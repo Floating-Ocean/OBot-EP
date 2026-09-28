@@ -3,6 +3,7 @@
 #   .\dev.ps1                 # start both, open http://127.0.0.1:5173
 #   .\dev.ps1 -NoBrowser      # do not open a browser
 #   .\dev.ps1 -BackendPort 8010 -WebPort 5174
+#   .\dev.ps1 -BindAddress 0.0.0.0   # expose the dev preview to the network
 #
 # Open the Vite URL (5173), NOT :8000 — in dev mode :8000 only serves /api,
 # Vite serves the frontend and proxies /api to the backend.
@@ -10,12 +11,18 @@
 # Editing anything under web/src hot-reloads in place; backend edits under
 # server/ reload thanks to uvicorn --reload.
 #
+# SECURITY: the Vite dev server is a *development* server. It has no
+# authentication of its own and serves un-minified sources plus the whole
+# node_modules tree. -BindAddress 0.0.0.0 hands all of that to the network, so
+# it is off by default; use it only on a trusted LAN and never leave it running.
+#
 # NOTE: keep every message in this script ASCII/English so terminals without
 # CJK fonts do not print mojibake.
 
 param(
     [int]$BackendPort = 8000,
     [int]$WebPort = 5173,
+    [string]$BindAddress = '127.0.0.1',
     [switch]$NoBrowser
 )
 
@@ -23,6 +30,7 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $venvPython = Join-Path $root '.venv\Scripts\python.exe'
 $webDir = Join-Path $root 'web'
+$bind = $BindAddress
 
 if (-not (Test-Path $venvPython)) {
     Write-Host '[x] .venv not found. Run "uv sync" first.' -ForegroundColor Red
@@ -71,33 +79,43 @@ if ($webUp) {
 
 # Vite dev server first, in the background of THIS process, so it dies with it.
 if (-not $webUp) {
-    Write-Host "[*] Starting Vite dev server on http://127.0.0.1:$WebPort ..." -ForegroundColor Cyan
+    Write-Host "[*] Starting Vite dev server on http://${bind}:$WebPort ..." -ForegroundColor Cyan
     $env:OBOT_EP_API = "http://127.0.0.1:$BackendPort"
     $env:OBOT_EP_WEB_PORT = "$WebPort"
+    $env:OBOT_EP_WEB_HOST = "$bind"
     $vite = Start-Process -FilePath 'cmd.exe' `
         -ArgumentList '/c', 'npm run dev' `
         -WorkingDirectory $webDir `
         -PassThru -NoNewWindow
 }
 
+if ($bind -ne '127.0.0.1') {
+    Write-Host ''
+    Write-Host "    [!] Dev preview bound to $bind - exposed to the network." -ForegroundColor Yellow
+    Write-Host '        The Vite dev server has no authentication and serves raw sources.' -ForegroundColor Yellow
+    Write-Host '        Stop it when you are done. Use the -Local start.ps1 build for real use.' -ForegroundColor Yellow
+}
+
 if (-not $NoBrowser) {
+    $browseHost = if ($bind -eq '0.0.0.0') { '127.0.0.1' } else { $bind }
     Start-Job -ScriptBlock {
         param($url)
         Start-Sleep -Seconds 4
         Start-Process $url
-    } -ArgumentList "http://127.0.0.1:$WebPort" | Out-Null
+    } -ArgumentList "http://${browseHost}:$WebPort" | Out-Null
 }
 
 Write-Host ''
-Write-Host "    Frontend (open this) : http://127.0.0.1:$WebPort" -ForegroundColor Green
-Write-Host "    API (proxied)        : http://127.0.0.1:$BackendPort/api" -ForegroundColor DarkGray
-Write-Host "    API docs             : http://127.0.0.1:$BackendPort/docs" -ForegroundColor DarkGray
+Write-Host "    Frontend (open this) : http://${bind}:$WebPort" -ForegroundColor Green
+Write-Host "    API (proxied)        : http://${bind}:$WebPort/api" -ForegroundColor DarkGray
+Write-Host "    Backend direct       : http://127.0.0.1:$BackendPort/api" -ForegroundColor DarkGray
 Write-Host ''
 Write-Host '    Ctrl+C stops both.' -ForegroundColor DarkGray
 Write-Host ''
 
 try {
     if (-not $backendUp) {
+        # 后端始终只绑回环：开发时浏览器走 Vite 代理，不需要把 API 也暴露出去
         & $venvPython -m uvicorn server.app:app --host 127.0.0.1 --port $BackendPort --reload
     } else {
         # Backend already running elsewhere: just keep this process (and Vite) alive.

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -22,6 +23,8 @@ from typing import Any, Iterable
 
 from . import config
 from .security import hash_password, verify_password
+
+logger = logging.getLogger("obot_ep")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -68,7 +71,8 @@ CREATE INDEX IF NOT EXISTS idx_submissions_author ON submissions(author_id, crea
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    actor_id   INTEGER REFERENCES users(id),
+    -- 用户被删掉时保留日志行，只把 actor 置空：审计记录不该跟着账号一起消失
+    actor_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
     action     TEXT    NOT NULL,
     detail     TEXT    NOT NULL DEFAULT '',
     created_at REAL    NOT NULL,
@@ -221,11 +225,62 @@ class Repository:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
+            self._migrate_audit_actor_fk()
             self._conn.commit()
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def _migrate_audit_actor_fk(self) -> None:
+        """把老库的 audit_logs.actor_id 升级成 ON DELETE SET NULL。
+
+        CREATE TABLE IF NOT EXISTS 不会修改已存在的表，所以 0.1.0 之前建的库
+        仍然带着「删用户必须先把日志删掉」的旧外键：那会让 delete_user 直接
+        抛 IntegrityError（而每个登录过的账号都必定有日志）。这里按 SQLite
+        官方的重建流程迁一次，迁移只做一次，之后靠外键定义判断就会跳过。
+        """
+        row = self._query_one(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'audit_logs'"
+        )
+        if row is None:
+            return
+        definition = str(row["sql"] or "")
+        if "SET NULL" in definition.upper():
+            return
+
+        logger.info("migrating audit_logs.actor_id to ON DELETE SET NULL")
+        try:
+            self._conn.commit()
+            self._conn.execute("PRAGMA foreign_keys=OFF")
+            self._conn.executescript(
+                """
+                CREATE TABLE audit_logs_new (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    action     TEXT    NOT NULL,
+                    detail     TEXT    NOT NULL DEFAULT '',
+                    created_at REAL    NOT NULL,
+                    is_admin   INTEGER NOT NULL DEFAULT 0,
+                    username   TEXT    NOT NULL DEFAULT ''
+                );
+                INSERT INTO audit_logs_new
+                    (id, actor_id, action, detail, created_at, is_admin, username)
+                    SELECT id,
+                           CASE WHEN actor_id IN (SELECT id FROM users) THEN actor_id ELSE NULL END,
+                           action, detail, created_at, is_admin, username
+                      FROM audit_logs;
+                DROP TABLE audit_logs;
+                ALTER TABLE audit_logs_new RENAME TO audit_logs;
+                CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+                """
+            )
+        except sqlite3.Error as error:
+            # 迁移失败就继续用旧表：delete_user 仍会因为外键拒绝，但不会更糟
+            logger.warning("audit_logs migration failed, keeping the old table: %s", error)
+        finally:
+            self._conn.commit()
+            self._conn.execute("PRAGMA foreign_keys=ON")
 
     # ---------- 内部小工具 ----------
 
@@ -283,6 +338,13 @@ class Repository:
 
     def get_user_with_hash(self, username: str) -> tuple[User, str] | None:
         row = self.get_user_by_username(username)
+        if row is None:
+            return None
+        return self._row_to_user(row), str(row["password_hash"])
+
+    def get_user_and_hash(self, user_id: int) -> tuple[User, str] | None:
+        """按 id 取用户，同时带出口令摘要（会话版本校验要用）。"""
+        row = self._query_one("SELECT * FROM users WHERE id = ?", (user_id,))
         if row is None:
             return None
         return self._row_to_user(row), str(row["password_hash"])
@@ -349,7 +411,26 @@ class Repository:
         self._execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))
 
     def delete_user(self, user_id: int) -> None:
+        """删除账号。
+
+        submissions.author_id / reviewer_id 是 NO ACTION，所以有提交历史的账号
+        会被外键挡住。与其把审核记录一起删掉（那样队列里会凭空少掉待审项），
+        不如让调用方明确告诉管理员「先停用」。
+        """
         self._execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    def user_dependency_counts(self, user_id: int) -> dict[str, int]:
+        """删除账号前要看的引用计数。"""
+        counts: dict[str, int] = {}
+        for table, column in (
+            ("submissions", "author_id"),
+            ("submissions", "reviewer_id"),
+        ):
+            row = self._query_one(
+                f"SELECT COUNT(*) AS n FROM {table} WHERE {column} = ?", (user_id,)
+            )
+            counts[f"{table}.{column}"] = int(row["n"]) if row else 0
+        return counts
 
     def open_submission_counts(self) -> dict[int, int]:
         """每个作者还待处理的提交数（pending + approved）。"""
@@ -506,7 +587,7 @@ class Repository:
         page_size = 100000 if limit is None else max(1, min(limit, 200))
         rows = self._query(
             self._SUBMISSION_SELECT + clause + " ORDER BY s.created_at DESC LIMIT ? OFFSET ?",
-            [*params, page_size, max(0, offset)],
+            [*params, page_size, _safe_offset(offset)],
         )
         return [self._row_to_submission(row) for row in rows], total
 
@@ -713,7 +794,7 @@ class Repository:
         total = int(total_row["n"]) if total_row else 0
         rows = self._query(
             "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (max(1, min(limit, 500)), max(0, offset)),
+            (max(1, min(limit, 500)), _safe_offset(offset)),
         )
         return [
             {
@@ -727,6 +808,21 @@ class Repository:
             }
             for row in rows
         ], total
+
+
+def _safe_offset(offset: Any) -> int:
+    """把 offset 收进 SQLite INTEGER 的范围。
+
+    `(page - 1) * page_size` 由请求参数算出，一个巨大的 page 会让 Python 整数
+    超出 64 位，SQLite 直接抛 OverflowError（本该是 400 的请求变成 500）。
+    """
+    try:
+        value = int(offset)
+    except (TypeError, ValueError):
+        return 0
+    if value < 0:
+        return 0
+    return min(value, 2**63 - 1)
 
 
 def _dumps(value: Any) -> str:

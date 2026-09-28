@@ -2,19 +2,41 @@
 
 from __future__ import annotations
 
+import os
+import secrets
+import threading
+
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, Response as RawResponse
 
 from .. import config
 from ..changes import effective_image, image_pending_changes, load_open_submissions
-from ..hashing import base62_to_md5, hash_id_of, make_thumbnail, thumbnail_cache_key
+from ..hashing import (
+    ThumbnailError,
+    base62_to_md5,
+    hash_id_of,
+    make_thumbnail,
+    thumbnail_cache_key,
+)
 from ..palette import accent_of
-from ..store import NotFoundError, StoreError, ValidationError
+from ..store import NotFoundError, PickOneStore, StoreError, ValidationError
 from .deps import CurrentUser, Repo, Store
 
 router = APIRouter(prefix="/images", tags=["images"])
 
 _GIF_MEDIA_TYPE = "image/gif"
+
+
+def _require_valid_category(img_key: str) -> None:
+    """类别标识会参与拼路径，先按数据层的规则卡一道。
+
+    非法标识直接 404，不要等到文件系统调用时才报错 —— 既不泄露路径，
+    也不会把 os.stat 的错误信息带进响应。
+    """
+    if not PickOneStore.is_valid_key(img_key):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"类别不存在: {img_key}"
+        )
 
 
 def _stat_to_payload(stat) -> dict:
@@ -38,7 +60,7 @@ def list_images(
     repo: Repo,
     store: Store,
     user: CurrentUser,
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=1_000_000),
     page_size: int = Query(default=60, ge=1, le=200),
     q: str = Query(default="", max_length=64),
     filter: str = Query(default="all", pattern="^(all|missing_ocr|has_change)$"),
@@ -50,6 +72,7 @@ def list_images(
     字段值都是磁盘原值；审核中的改动放在 pending_changes 里，只有自己的那条
     会带 mine=true（前端从它接着改，别人的只能看）。
     """
+    _require_valid_category(img_key)
     try:
         store.category_or_404(img_key)
     except NotFoundError as error:
@@ -105,6 +128,7 @@ def list_images(
 @router.get("/{img_key}/stats")
 def image_stats(img_key: str, repo: Repo, store: Store, _user: CurrentUser) -> dict:
     """类别级统计，用于页面上的进度提示。"""
+    _require_valid_category(img_key)
     try:
         store.category_or_404(img_key)
     except NotFoundError as error:
@@ -135,6 +159,7 @@ def image_stats(img_key: str, repo: Repo, store: Store, _user: CurrentUser) -> d
 
 @router.get("/{img_key}/item/{name}")
 def image_detail(img_key: str, name: str, repo: Repo, store: Store, user: CurrentUser) -> dict:
+    _require_valid_category(img_key)
     try:
         stat = store.get_image_stat(img_key, name)
     except (NotFoundError, ValidationError, StoreError) as error:
@@ -149,6 +174,7 @@ def image_detail(img_key: str, name: str, repo: Repo, store: Store, user: Curren
 @router.get("/{img_key}/raw/{name}")
 def raw_image(img_key: str, name: str, store: Store, _user: CurrentUser) -> FileResponse:
     """原图（GIF）。"""
+    _require_valid_category(img_key)
     try:
         path = store.image_path(img_key, name)
     except (NotFoundError, ValidationError, StoreError) as error:
@@ -164,6 +190,7 @@ def raw_image(img_key: str, name: str, store: Store, _user: CurrentUser) -> File
 @router.get("/{img_key}/thumb/{name}")
 def thumbnail(img_key: str, name: str, store: Store, _user: CurrentUser) -> RawResponse:
     """缩略图（WebP，磁盘缓存）。动图只取前几帧，避免一次解码上千张。"""
+    _require_valid_category(img_key)
     try:
         path = store.image_path(img_key, name)
     except (NotFoundError, ValidationError, StoreError) as error:
@@ -173,24 +200,34 @@ def thumbnail(img_key: str, name: str, store: Store, _user: CurrentUser) -> RawR
     cache_key = thumbnail_cache_key(str(path), stat.st_mtime_ns, stat.st_size)
     cache_path = config.THUMB_DIR / f"{cache_key}.webp"
 
-    if cache_path.is_file():
+    cached = _read_thumb_cache(cache_path)
+    if cached is not None:
         return RawResponse(
-            content=cache_path.read_bytes(),
+            content=cached,
             media_type="image/webp",
             headers={"Cache-Control": "private, max-age=604800"},
         )
 
+    if stat.st_size > config.THUMB_MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="图片文件过大，无法生成缩略图",
+        )
+
     try:
         data = make_thumbnail(path.read_bytes())
-    except Exception as error:  # 坏图不应该把整个页面拖垮
+    except ThumbnailError as error:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(error)
+        ) from error
+    except Exception:  # 坏图不应该把整个页面拖垮
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"无法生成缩略图: {error}",
-        ) from error
+            detail="无法生成缩略图（图片格式损坏或不受支持）",
+        ) from None
 
-    config.THUMB_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        cache_path.write_bytes(data)
+        _write_thumb_cache(cache_path, data)
     except OSError:
         pass
 
@@ -201,9 +238,62 @@ def thumbnail(img_key: str, name: str, store: Store, _user: CurrentUser) -> RawR
     )
 
 
+def _read_thumb_cache(cache_path) -> bytes | None:
+    """读缩略图缓存；文件缺失、读不出来或明显不完整时返回 None（下次重新生成）。
+
+    缓存键只包含源文件的 (路径, mtime, 大小)，一旦缓存里落下的是被截断的 WebP，
+    浏览器会一直拿到坏图。所以这里不只看文件在不在，还要看 RIFF 头声明的大小
+    和实际长度对不对得上 —— 只做长度校验，不用重新解码。
+    """
+    try:
+        data = cache_path.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return None
+    declared = int.from_bytes(data[4:8], "little") + 8
+    if declared != len(data):
+        return None
+    return data
+
+
+def _write_thumb_cache(cache_path, data: bytes) -> None:
+    """原子地写缩略图缓存。
+
+    直接 write_bytes 的话，并发请求可能读到只写了一半的 WebP（浏览器随即报
+    "image corrupt"）。临时文件 + os.replace 与数据文件的写回方式保持一致，
+    临时名里带上线程 id 和随机串，避免两个并发请求共用同一个临时文件。
+    """
+    tmp_path = cache_path.with_name(
+        f".{cache_path.name}.{os.getpid()}.{threading.get_ident()}.{secrets.token_hex(4)}.tmp"
+    )
+    try:
+        config.THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        with open(tmp_path, "wb") as handle:
+            handle.write(data)
+        os.replace(tmp_path, cache_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 @router.get("/{img_key}/hash-id/{hash_id}")
-def lookup_by_hash_id(img_key: str, hash_id: str, store: Store, _user: CurrentUser) -> dict:
+def lookup_by_hash_id(
+    img_key: str,
+    hash_id: str,
+    store: Store,
+    _user: CurrentUser,
+) -> dict:
     """按 Bot 回复里的 Base62 ID 反查图片。"""
+    _require_valid_category(img_key)
+    # 先在路由层卡长度：base62_to_md5 会做大整数累乘，长度不设限就是白送 CPU
+    if not 1 <= len(hash_id) <= 22:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="ID 长度不合法（1..22）"
+        )
     try:
         md5 = base62_to_md5(hash_id)
     except ValueError as error:

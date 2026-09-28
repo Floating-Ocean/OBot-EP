@@ -272,9 +272,21 @@ def image_conflict(store: PickOneStore, submission: Submission) -> Conflict | No
     )
 
 
+def _case_twin(categories: dict[str, Category], img_key: str) -> str | None:
+    """在已有类别里找出与 img_key 只差大小写的那个标识（没有则返回 None）。"""
+    folded = img_key.casefold()
+    for existing in categories:
+        if existing != img_key and existing.casefold() == folded:
+            return existing
+    return None
+
+
 def category_conflict(store: PickOneStore, submission: Submission) -> Conflict | None:
     """检查类别提交：新增撞名、已有类别被删或被改、别名被占用。"""
-    existing = store.load_categories().get(submission.img_key)
+    categories = store.load_categories()
+    existing = categories.get(submission.img_key)
+    # 目录不区分大小写，「新类别」可能只是已有类别的另一种写法
+    twin = _case_twin(categories, submission.img_key) if existing is None else None
     value = submission.submitted_value if isinstance(submission.submitted_value, dict) else {}
 
     if submission.type == TYPE_CATEGORY_CREATE:
@@ -284,6 +296,13 @@ def category_conflict(store: PickOneStore, submission: Submission) -> Conflict |
                 reason="该类别标识已被占用（可能在申请之后被创建）",
                 base_value=None,
                 current_value={"id": existing.id, "keys": list(existing.keys)},
+            )
+        if twin is not None:
+            return Conflict(
+                submission=submission,
+                reason=f"已存在只差大小写的类别标识 {twin}（Windows/macOS 下是同一个目录）",
+                base_value=None,
+                current_value={"id": twin, "keys": list(categories[twin].keys)},
             )
         return None
 
@@ -526,6 +545,7 @@ def resolve_conflict(
     注意：选择「保留新值」本身就是管理员的裁定 —— 他知道磁盘当前值和提交值不一样，
     并且决定用提交值覆盖。所以这里**不会**再拿旧的 base_value 去判定冲突，
     只确认目标仍然存在（图片没被删、类别还在），否则拒绝写入。
+    返回值的 dropped_aliases 会列出因被别的类别占用而没有写入的别名。
     """
     submission = repo.get_submission(submission_id)
     if submission is None:
@@ -545,6 +565,7 @@ def resolve_conflict(
 
     # 单条写入，不再走冲突判定（原因见上面的 docstring）
     plan = ApplyPlan()
+    dropped_aliases: list[str] = []
     name = field_of(updated)
     if name is not None:
         plan.image_changes[updated.img_key] = [
@@ -562,9 +583,17 @@ def resolve_conflict(
         current = store.load_categories().get(updated.img_key)
         if updated.type == TYPE_CATEGORY_CREATE:
             plan.new_keys.append(updated.img_key)
+        keys = _dedupe(value.get("keys") or (list(current.keys) if current else []))
+        # 管理员是在知情的前提下选择覆盖的，所以这里不再拿 base_value 判定冲突；
+        # 但别名的唯一性是 config.json 的硬约束：同一个别名指向两个类别时，Bot 的
+        # match_dict 会随机挑一个，等于悄悄把别名从另一个类别手里抢走。所以把
+        # 「已被别人占用」的别名摘掉再写，并把结果回给管理员。
+        keys, dropped_aliases = _without_taken_aliases(
+            store, keys, exclude_key=updated.img_key
+        )
         entry = {
             "id": value.get("id") or (current.id if current else updated.img_key),
-            "key": _dedupe(value.get("keys") or (list(current.keys) if current else [])),
+            "key": keys,
         }
         if not entry["key"]:
             entry["key"] = [entry["id"]]
@@ -577,12 +606,37 @@ def resolve_conflict(
         repo.mark_applied(applied_id, plan.applied_values.get(applied_id))
 
     latest = repo.get_submission(submission_id)
-    return {
+    result = {
         "resolved": "applied",
         "applied": True,
         **written,
         "submission": latest.to_dict() if latest else updated.to_dict(),
     }
+    if dropped_aliases:
+        result["dropped_aliases"] = dropped_aliases
+    return result
+
+
+def _without_taken_aliases(
+    store: PickOneStore, keys: list[str], *, exclude_key: str
+) -> tuple[list[str], list[str]]:
+    """摘掉已被其它类别占用的别名，返回 (留下的, 摘掉的)。"""
+    owner: dict[str, str] = {}
+    for category in store.load_categories().values():
+        if category.img_key == exclude_key:
+            continue
+        for alias in category.keys:
+            owner[store.normalize_alias(alias).casefold()] = category.img_key
+
+    kept: list[str] = []
+    dropped: list[str] = []
+    for alias in keys:
+        folded = store.normalize_alias(alias).casefold()
+        if folded in owner:
+            dropped.append(alias)
+        else:
+            kept.append(alias)
+    return kept, dropped
 
 
 def _ensure_target_writable(store: PickOneStore, submission: Submission) -> None:

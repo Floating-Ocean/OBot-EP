@@ -14,6 +14,17 @@ const submitting = ref(false)
 const authConfig = ref({ allow_register: true, needs_bootstrap: false })
 const form = reactive({ username: '', password: '', display_name: '' })
 
+/**
+ * 登录后跳回 ?redirect=，但目标必须是本站内的绝对路径。
+ * 直接把 query 交给 router.replace 的话，`//evil.com` 之类会被当成协议相对地址
+ * 跳出去 —— 那样钓鱼页面就能顶着我们的域名做跳板。
+ */
+function safeRedirect(target) {
+  if (typeof target !== 'string' || !target.startsWith('/')) return '/'
+  if (target.startsWith('//') || target.startsWith('/\\')) return '/'
+  return target
+}
+
 async function loadConfig() {
   try {
     authConfig.value = await api.authConfig()
@@ -44,7 +55,7 @@ async function submit() {
       })
     }
 
-    const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
+    const redirect = safeRedirect(route.query.redirect)
     // 普通用户被重定向到管理员页时兜底回首页
     if (!session.isAdmin.value && redirect.startsWith('/pickone/review')) {
       router.replace('/')

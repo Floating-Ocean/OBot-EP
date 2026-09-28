@@ -87,16 +87,32 @@ def bot_versions() -> dict[str, str | None]:
     }
 
 
+def _public_versions() -> dict[str, str | None]:
+    """公开给未登录访客的版本信息：只有版本号，没有 commit。
+
+    页面上的版本标签用得上，而 commit 短哈希等于把「所维护仓库的确切代码版本」
+    告诉任何访客 —— 那是漏洞探测的现成输入，没必要公开。
+    """
+    data = bot_versions()
+    return {"obot_ep": "0.1.0", "obot": data["obot"], "pickone": data["pickone"]}
+
+
 @router.get("/health")
 def health() -> dict:
-    """无需登录，供探活使用。"""
-    return {"ok": True, "service": "obot-ep", "lib_dir": str(config.PICK_ONE_DIR)}
+    """无需登录，供探活使用。
+
+    刻意不带 lib_dir 之类的路径：探活接口是公开的，磁盘布局不该出现在这里。
+    """
+    return {"ok": True, "service": "obot-ep"}
 
 
 @router.get("/meta/versions")
 def versions() -> dict:
-    """版本号：本工具 + 所维护的 OBot-ACM。无需登录，登录页也能显示。"""
-    return {"obot_ep": "0.1.0", **bot_versions()}
+    """版本号：本工具 + 所维护的 OBot-ACM。
+
+    无需登录（页面底部要显示），所以只给版本号，不给 commit（见 _public_versions）。
+    """
+    return _public_versions()
 
 
 @router.get("/meta/info")
@@ -104,10 +120,11 @@ def info(repo: Repo, store: Store, user: CurrentUser) -> dict:
     counts = repo.count_by_status()
     return {
         "user": user.to_dict(),
-        "lib_dir": str(store.lib_dir),
+        # 只给「目录在不在」，不给绝对路径：路径属于服务端内部信息
         "lib_available": store.lib_dir.is_dir(),
         "allow_register": config.ALLOW_REGISTER,
         "submission_counts": counts,
         "roles": ["user", "admin"],
+        # 登录用户可以看到完整版本信息（含 commit）
         "versions": {"obot_ep": "0.1.0", **bot_versions()},
     }

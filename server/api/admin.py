@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 from fastapi import APIRouter, HTTPException, Query, status
 
 from .. import config
@@ -14,7 +16,14 @@ from ..repository import (
     ConflictError,
     Repository,
 )
-from ..schemas import ApplyRequest, ConflictResolveRequest, ReviewRequest, UserCreateRequest, UserUpdateRequest
+from ..schemas import (
+    ApplyRequest,
+    ConflictResolveRequest,
+    ReviewBatchRequest,
+    ReviewRequest,
+    UserCreateRequest,
+    UserUpdateRequest,
+)
 from ..store import StoreError, ValidationError
 from .deps import AdminUser, Repo, Store
 
@@ -31,7 +40,7 @@ def review_queue(
         pattern="^(pending|approved|conflict|rejected|applied|all)$",
     ),
     img_key: str = Query(default="", max_length=64),
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=1_000_000),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     """待审核 / 待应用 / 冲突 / 已处理队列。"""
@@ -55,28 +64,20 @@ def review_queue(
 
 @router.post("/review/batch")
 def review_batch(
-        payload: dict,
+        payload: ReviewBatchRequest,
         repo: Repo,
         admin: AdminUser,
 ) -> dict:
-    """批量审核。body: {"ids": [...], "approve": true, "comment": ""}"""
-    ids = payload.get("ids") or []
-    approve = bool(payload.get("approve"))
-    comment = str(payload.get("comment") or "")[:200]
-
-    if not isinstance(ids, list) or not ids:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请选择要审核的提交")
-
+    """批量审核：批准 / 驳回一批提交单。"""
     succeeded: list[int] = []
     failed: list[dict] = []
-    for raw_id in ids[:200]:
-        try:
-            submission_id = int(raw_id)
-        except (TypeError, ValueError):
-            continue
+    for submission_id in payload.ids:
         try:
             repo.review_submission(
-                submission_id, approve=approve, reviewer_id=admin.id, comment=comment
+                submission_id,
+                approve=payload.approve,
+                reviewer_id=admin.id,
+                comment=payload.comment,
             )
             succeeded.append(submission_id)
         except KeyError:
@@ -88,7 +89,7 @@ def review_batch(
         actor_id=admin.id,
         username=admin.username,
         action="review_batch",
-        detail=f"批量{'通过' if approve else '驳回'} {len(succeeded)} 条，失败 {len(failed)} 条",
+        detail=f"批量{'通过' if payload.approve else '驳回'} {len(succeeded)} 条，失败 {len(failed)} 条",
         is_admin=True,
     )
     return {"succeeded": succeeded, "failed": failed}
@@ -206,7 +207,7 @@ def _build_apply_preview(repo: Repository, store) -> dict:
 def list_conflicts(
     repo: Repo,
     admin: AdminUser,
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=1_000_000),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     """列出所有挂起的冲突，附三方对比信息。"""
@@ -243,12 +244,12 @@ def resolve(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
     except (StoreError, ValidationError) as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    except OSError as error:
-        # 英文的底层错误，避免把中文写进可能被开发模式打印的异常里
+    except OSError:
+        # 底层异常信息里带着服务端的绝对路径，不往响应里放
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"写盘失败（权限或磁盘问题）: {error}",
-        ) from error
+            detail="写盘失败（权限或磁盘问题），请查看服务端日志",
+        ) from None
 
     repo.add_log(
         actor_id=admin.id,
@@ -279,11 +280,11 @@ def apply_changes(payload: ApplyRequest, repo: Repo, store: Store, admin: AdminU
         result = apply_approved(repo, store)
     except (StoreError, ValidationError) as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    except OSError as error:
+    except OSError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"写盘失败: {error}",
-        ) from error
+            detail="写盘失败（权限或磁盘问题），请查看服务端日志",
+        ) from None
 
     repo.add_log(
         actor_id=admin.id,
@@ -308,7 +309,7 @@ def integrity(store: Store, admin: AdminUser) -> dict:
 def logs(
     repo: Repo,
     admin: AdminUser,
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=1_000_000),
     page_size: int = Query(default=50, ge=1, le=200),
 ) -> dict:
     items, total = repo.list_logs(limit=page_size, offset=(page - 1) * page_size)
@@ -419,7 +420,27 @@ def delete_user(user_id: int, repo: Repo, admin: AdminUser) -> dict:
             status_code=status.HTTP_400_BAD_REQUEST, detail="至少要保留一个管理员"
         )
 
-    repo.delete_user(user_id)
+    # 有提交记录的账号删不掉（审核历史还引用着它）。与其让它以 500 的形式
+    # 崩在 SQLite 的外键上，不如明确告诉管理员改用什么操作。
+    deps = repo.user_dependency_counts(user_id)
+    blocking = sum(deps.values())
+    if blocking:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"该账号有 {blocking} 条提交记录（作者或审核人），无法直接删除。"
+                "若要收回权限，请改为「停用账号」。"
+            ),
+        )
+
+    try:
+        repo.delete_user(user_id)
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="该账号仍被其它记录引用，请改为「停用账号」",
+        ) from error
+
     repo.add_log(
         actor_id=admin.id,
         username=admin.username,

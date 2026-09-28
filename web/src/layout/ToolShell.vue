@@ -34,7 +34,7 @@ onUnmounted(() => {
 })
 
 /** OBot-ACM 自己的版本号，从后端读（后端直接读它的源码常量）。 */
-const versions = ref({ obot: null, pickone: null })
+const versions = ref({ obot: null, pickone: null, commit: null })
 
 const versionLabel = computed(() => versions.value.obot ?? `v${APP_VERSION}`)
 
@@ -48,7 +48,10 @@ const versionTitle = computed(() => {
 
 onMounted(async () => {
   try {
-    versions.value = await api.versions()
+    // /meta/info 是登录后才读得到的完整版本信息（含 commit）；
+    // 公开的 /meta/versions 只给版本号，不带 commit。
+    const data = await api.meta()
+    versions.value = data.versions ?? versions.value
   } catch {
     /* 读不到就只显示本工具版本 */
   }

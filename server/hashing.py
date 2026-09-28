@@ -10,8 +10,9 @@ import hashlib
 import io
 import string
 import threading
+import warnings
 
-from PIL import Image
+from PIL import Image, ImageFile
 
 from . import config
 
@@ -20,6 +21,12 @@ _CHAR_TO_INDEX = {char: index for index, char in enumerate(_BASE62_CHARSET)}
 
 MD5_LENGTH = 32
 GIF_SUFFIX = ".gif"
+
+# 缩略图服务的输入是磁盘上的 GIF。这些文件理论上由 Bot 写入，但维护平台不该假设
+# 输入一定友好：一张「像素数巨大」的图能让 Pillow 在解码时把内存吃光。
+# 两道闸：像素数上限（超过直接报错），以及不完整的图不当作致命错误。
+Image.MAX_IMAGE_PIXELS = config.THUMB_MAX_PIXELS
+ImageFile.LOAD_TRUNCATED_IMAGES = False
 
 
 def md5_to_base62(md5_hash: str) -> str:
@@ -83,33 +90,79 @@ def new_legacy_entry(ocr_text: str, add_time: float) -> dict:
 _thumb_lock = threading.Lock()
 
 
+class ThumbnailError(Exception):
+    """缩略图无法生成（图太大、格式坏了等），属于可预期的输入问题。"""
+
+
 def make_thumbnail(raw: bytes, max_side: int = config.THUMB_MAX_SIDE) -> bytes:
-    """把动图/静图压成一张 WebP 缩略图。"""
-    with Image.open(io.BytesIO(raw)) as img:
-        frames = []
+    """把动图/静图压成一张 WebP 缩略图。
+
+    像素数超出 config.THUMB_MAX_PIXELS 时抛 ThumbnailError 而不是 MemoryError：
+    调用方据此返回 415，整个页面不会被一张坏图拖垮。
+    """
+    try:
+        with warnings.catch_warnings():
+            # Pillow 对「接近上限」的图只发警告，这里升级成错误一起拦住
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(raw)) as img:
+                return _render_thumbnail(img, max_side)
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as error:
+        raise ThumbnailError(f"图片像素数超过上限（{config.THUMB_MAX_PIXELS}）") from error
+
+
+def _render_thumbnail(img: Image.Image, max_side: int) -> bytes:
+    """把已经打开的图片渲染成 WebP 字节。
+
+    帧是「处理一帧、缩放一帧、丢掉一帧」，而不是先把所有帧都以 RGBA 留在内存里：
+    像素上限给的是解码预算，逐帧处理才不会在预算内把峰值内存翻好几倍。
+    """
+    size = (max_side, max_side)
+    first = None
+    canvas = None
+    frame_count = 0
+
+    try:
+        total = min(getattr(img, "n_frames", 1), config.THUMB_MAX_FRAMES)
+    except (EOFError, ValueError):
+        total = 1
+
+    for index in range(max(1, total)):
         try:
-            for index in range(min(getattr(img, "n_frames", 1), config.THUMB_MAX_FRAMES)):
-                img.seek(index)
-                frames.append(img.convert("RGBA").copy())
+            img.seek(index)
+            frame = img.convert("RGBA")
         except (EOFError, ValueError):
-            pass
+            break
 
-        if not frames:
-            frames = [img.convert("RGBA")]
-
-        first = frames[0]
-        # 动图取各帧平均时长，叠成一个静态图，省掉 WebP 动画的兼容麻烦
-        if len(frames) > 1:
-            width, height = first.size
-            canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            for frame in frames:
+        if index == 0:
+            first = frame
+            first.thumbnail(size, Image.LANCZOS)
+        elif first is not None and frame.size != first.size:
+            # 帧尺寸不一致（少见的 GIF 子矩形帧）：合并不了就只留首帧
+            del frame
+            break
+        else:
+            # 动图：把后续帧叠到一起，做成一张静态图，省掉 WebP 动画的兼容麻烦
+            try:
+                if canvas is None:
+                    canvas = Image.new("RGBA", first.size, (0, 0, 0, 0))
                 canvas = Image.alpha_composite(canvas, frame)
-            first = Image.blend(frames[0], canvas, 0.35)
+            except ValueError:
+                del frame
+                break
+        frame_count = index + 1
+        del frame
 
-        first.thumbnail((max_side, max_side), Image.LANCZOS)
-        buffer = io.BytesIO()
-        first.convert("RGBA").save(buffer, format="WEBP", quality=82, method=4)
-        return buffer.getvalue()
+    if first is None:  # pragma: no cover - 头一帧都读不出来时按坏图处理
+        raise ThumbnailError("无法解码图片的第一帧")
+
+    if canvas is not None and frame_count > 1:
+        # canvas 也是首帧的尺寸，缩到同一尺寸后按透明度混合
+        canvas.thumbnail(size, Image.LANCZOS)
+        first = Image.blend(first, canvas, 0.35)
+
+    buffer = io.BytesIO()
+    first.convert("RGBA").save(buffer, format="WEBP", quality=82, method=4)
+    return buffer.getvalue()
 
 
 def thumbnail_cache_key(path_text: str, mtime_ns: int, size: int) -> str:

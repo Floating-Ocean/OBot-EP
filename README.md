@@ -39,12 +39,14 @@ NodeJS >= 24.0
 ### 1. 一键启动
 
 ```bash
-.\start.ps1
+.\start.ps1            # 监听 0.0.0.0，局域网内可直接访问 http://<本机IP>:8000
+.\start.ps1 -Local     # 只监听 127.0.0.1，仅本机可用
 ```
 
 ### 2. 调试
 ```bash
-.\dev.ps1
+.\dev.ps1                        # 前端 5173 + 后端 8000，都只绑回环
+.\dev.ps1 -BindAddress 0.0.0.0   # 把开发预览也暴露到局域网（仅限受信任内网）
 ```
 
 
@@ -55,7 +57,9 @@ NodeJS >= 24.0
 
 ```bash
 uv sync
-uv run uvicorn server.app:app --reload --port 8000
+uv run uvicorn server.app:app --host 127.0.0.1 --port 8000   # 仅本机
+uv run uvicorn server.app:app --host 0.0.0.0 --port 8000     # 局域网可访问
+# 也可以直接：uv run python app.py --host 0.0.0.0 --port 8000
 ```
 
 首次启动会创建管理员账号，**初始密码打印在启动日志里**。
@@ -73,6 +77,7 @@ uv run python -m server.manage role --user alice --role admin
 uv run python -m server.manage disable --user alice
 ```
 
+
 ### 2. 前端
 
 ```bash
@@ -86,17 +91,39 @@ npm run build
 
 可通过环境变量覆盖默认配置。
 
-| 变量                       | 默认值                      | 说明                             |
-|--------------------------|--------------------------|--------------------------------|
-| `OBOT_ACM_LIB_DIR`       | `../OBot-ACM/lib`        | OBot-ACM 的 `lib` 目录            |
-| `OBOT_PICK_ONE_DIR`      | `<lib>/Pick-One`         | Pick-One 数据目录                  |
-| `OBOT_EP_DATA_DIR`       | `./data`                 | 本地数据库与缩略图缓存                    |
-| `OBOT_EP_DB_PATH`        | `<data>/obot_ep.sqlite3` | SQLite 文件                      |
-| `OBOT_EP_SECRET`         | 随机                       | 会话签名密钥。**生产环境必须固定**，否则重启后所有人掉线 |
-| `OBOT_EP_SESSION_TTL`    | `2592000`                | 会话有效期（秒），默认 30 天               |
-| `OBOT_EP_ADMIN_USER`     | `admin`                  | 初始管理员用户名                       |
-| `OBOT_EP_ADMIN_PASSWORD` | 随机                       | 初始管理员密码，留空则随机生成并打印             |
-| `OBOT_EP_ALLOW_REGISTER` | `1`                      | 是否允许自助注册（注册后仅能提交，不能审核）         |
-| `OBOT_EP_FRONTEND_DIST`  | `./web/dist`             | 前端构建产物目录                       |
-| `OBOT_EP_API`            | `http://127.0.0.1:8000`  | Vite dev server 代理的后端地址        |
-| `OBOT_EP_WEB_PORT`       | `5173`                   | Vite dev server 端口             |
+| 变量                       | 默认值                      | 说明                                       |
+|--------------------------|--------------------------|------------------------------------------|
+| `OBOT_ACM_LIB_DIR`       | `../OBot-ACM/lib`        | OBot-ACM 的 `lib` 目录                      |
+| `OBOT_PICK_ONE_DIR`      | `<lib>/Pick-One`         | Pick-One 数据目录                            |
+| `OBOT_EP_DATA_DIR`       | `./data`                 | 本地数据库与缩略图缓存                              |
+| `OBOT_EP_DB_PATH`        | `<data>/obot_ep.sqlite3` | SQLite 文件                                |
+| `OBOT_EP_SECRET`         | 随机                       | 会话签名密钥。**生产环境必须固定**，否则重启后所有人掉线           |
+| `OBOT_EP_SESSION_TTL`    | `2592000`                | 会话有效期（秒），默认 30 天                         |
+| `OBOT_EP_COOKIE_SECURE`  | `0`                      | 设 `1` 时会话 Cookie 只走 HTTPS（挂在域名/反代后面务必打开） |
+| `OBOT_EP_ADMIN_USER`     | `admin`                  | 初始管理员用户名                                 |
+| `OBOT_EP_ADMIN_PASSWORD` | 随机                       | 初始管理员密码，留空则随机生成并打印                       |
+| `OBOT_EP_ALLOW_REGISTER` | `1`                      | 是否允许自助注册（注册后仅能提交，不能审核）                   |
+| `OBOT_EP_FRONTEND_DIST`  | `./web/dist`             | 前端构建产物目录                                 |
+| `OBOT_EP_API`            | `http://127.0.0.1:8000`  | Vite dev server 代理的后端地址                  |
+| `OBOT_EP_WEB_PORT`       | `5173`                   | Vite dev server 端口                       |
+
+限速与缩略图相关的可调项（一般不用改）：
+
+| 变量                             | 默认值        | 说明                                                    |
+|--------------------------------|------------|-------------------------------------------------------|
+| `OBOT_EP_LOGIN_MAX`            | `10`       | 每窗口允许的登录尝试次数（按 IP 和账号各算一份），`0` = 不限速                  |
+| `OBOT_EP_LOGIN_WINDOW`         | `300`      | 登录限速窗口（秒）                                             |
+| `OBOT_EP_REGISTER_MAX`         | `20`       | 每窗口允许的注册次数（按 IP）                                      |
+| `OBOT_EP_REGISTER_WINDOW`      | `3600`     | 注册限速窗口（秒）                                             |
+| `OBOT_EP_PASSWORD_MAX`         | `10`       | 每窗口允许的改密次数（按账号）                                       |
+| `OBOT_EP_PASSWORD_WINDOW`      | `900`      | 改密限速窗口（秒）                                             |
+| `OBOT_EP_AUTH_GLOBAL_MAX`      | `60`       | 全站认证请求上限（不限来源），兜底防并发爆破                                |
+| `OBOT_EP_AUTH_GLOBAL_WINDOW`   | `60`       | 全站认证窗口（秒）                                             |
+| `OBOT_EP_MAX_BODY_BYTES`       | `262144`   | 单个请求体上限（字节），超限直接 413                                  |
+| `OBOT_EP_TRUSTED_ORIGINS`      | 空          | 额外信任的写请求来源（逗号分隔），仅当前面有改写 Host 的代理时需要                  |
+| `OBOT_EP_TRUST_PROXY`          | `0`        | 设 `1` 时按 `X-Real-IP`/`X-Forwarded-For` 区分限速对象（反代部署必开） |
+| `OBOT_EP_TRUSTED_PROXY_IPS`    | 空          | 代理自身的地址（逗号分隔），用于从 `X-Forwarded-For` 里跳过它们             |
+| `OBOT_EP_ENABLE_DOCS`          | `0`        | 设 `1` 才开放 `/docs`、`/redoc`、`/openapi.json`（无需登录，默认关闭） |
+| `OBOT_EP_BIND_HOST`            | 空          | 进程实际绑定的地址，由启动脚本写入；仅用于启动时判断是否需要告警                      |
+| `OBOT_EP_THUMB_MAX_FILE_BYTES` | `33554432` | 生成缩略图的源文件大小上限（字节）                                     |
+| `OBOT_EP_THUMB_MAX_PIXELS`     | `40000000` | Pillow 允许解码的最大像素数                                     |

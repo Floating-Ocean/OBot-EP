@@ -98,6 +98,14 @@ class ReviewRequest(BaseModel):
     comment: str = Field(default="", max_length=200)
 
 
+class ReviewBatchRequest(BaseModel):
+    """批量审核。ids 限制条数，避免一次请求把整个队列塞进来。"""
+
+    ids: list[int] = Field(min_length=1, max_length=200)
+    approve: bool
+    comment: str = Field(default="", max_length=200)
+
+
 class ConflictResolveRequest(BaseModel):
     """冲突裁定：保留提交的新值（写入），或丢弃提交（保持磁盘现状）。"""
 

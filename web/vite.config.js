@@ -6,6 +6,16 @@ import AutoImport from 'unplugin-auto-import/vite'
 // 后端地址：开发时 Vite 把 /api 代理过去，前后端同源，会话 Cookie 直接带上。
 const BACKEND = process.env.OBOT_EP_API ?? 'http://127.0.0.1:8000'
 const DEV_PORT = Number(process.env.OBOT_EP_WEB_PORT ?? 5173)
+// 默认只绑回环。dev.ps1 -BindAddress 0.0.0.0 会把它放开到网络（仅限受信任的内网）。
+const DEV_HOST = process.env.OBOT_EP_WEB_HOST ?? '127.0.0.1'
+// 代理目标只允许本机：OBOT_EP_API 若被改成外部地址，开发者的会话 Cookie 会被
+// 转发给那台机器，所以这里对非回环目标直接报错，而不是默默照做。
+const backendIsLoopback = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(BACKEND)
+if (!backendIsLoopback) {
+  throw new Error(
+    `OBOT_EP_API must point at loopback (got ${BACKEND}); refusing to proxy your session cookie elsewhere.`,
+  )
+}
 
 export default defineConfig({
   plugins: [
@@ -21,9 +31,9 @@ export default defineConfig({
     },
   },
   server: {
-    // 显式绑 127.0.0.1：默认只监听 ::1，导致 127.0.0.1:5173 连不上、
+    // 显式绑回环：默认只监听 ::1，导致 127.0.0.1:5173 连不上、
     // 打印出来的 Local 地址也点不动，很容易以为没起来。
-    host: '127.0.0.1',
+    host: DEV_HOST,
     port: DEV_PORT,
     // 端口被占用时直接报错退出，不要悄悄换到 5174，否则代理目标对不上
     strictPort: true,

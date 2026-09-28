@@ -185,7 +185,7 @@ def list_submissions(
         pattern="^(open|pending|approved|conflict|applied|rejected|all)$",
     ),
     img_key: str = Query(default="", max_length=64),
-    page: int = Query(default=1, ge=1),
+    page: int = Query(default=1, ge=1, le=1_000_000),
     page_size: int = Query(default=20, ge=1, le=100),
 ) -> dict:
     """列出提交单。普通用户只能看自己的，管理员可以看全部。"""

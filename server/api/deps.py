@@ -8,7 +8,7 @@ from fastapi import Depends, HTTPException, Request, status
 
 from .. import config
 from ..repository import ROLE_ADMIN, Repository, User
-from ..security import parse_session_token
+from ..security import parse_session_token, token_version_matches
 from ..store import PickOneStore
 
 _UNAUTHORIZED = HTTPException(
@@ -29,14 +29,28 @@ def get_current_user(
     request: Request,
     repo: Annotated[Repository, Depends(get_repo)],
 ) -> User:
-    """从会话 Cookie 解出当前用户；未登录一律 401（全站需登录）。"""
+    """从会话 Cookie 解出当前用户；未登录一律 401（全站需登录）。
+
+    角色和启用状态都以数据库为准，不信令牌里的副本；令牌里的会话版本号还要
+    和当前口令摘要对上，这样改密码 / 被停用之后旧令牌立刻作废。
+    """
     token = request.cookies.get(config.SESSION_COOKIE)
     payload = parse_session_token(token)
     if not payload:
         raise _UNAUTHORIZED
 
-    user = repo.get_user(int(payload.get("uid", 0)))
-    if user is None or not user.is_active:
+    try:
+        user_id = int(payload.get("uid", 0))
+    except (TypeError, ValueError):
+        raise _UNAUTHORIZED from None
+
+    found = repo.get_user_and_hash(user_id)
+    if found is None:
+        raise _UNAUTHORIZED
+    user, password_hash = found
+    if not user.is_active:
+        raise _UNAUTHORIZED
+    if not token_version_matches(payload, password_hash):
         raise _UNAUTHORIZED
     return user
 

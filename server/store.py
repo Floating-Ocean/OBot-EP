@@ -274,13 +274,20 @@ class PickOneStore:
         self._cache.invalidate(path)
 
     def list_images(self, img_key: str) -> list[str]:
-        """列出类别下的 .gif 文件名（已排序），目录不存在时返回空表。"""
+        """列出类别下的 .gif 文件名（已排序），目录不存在时返回空表。
+
+        只认「文件名即内容 MD5」的图：Bot 之外留下的杂项 .gif（截图、说明图）
+        如果混进来，`hash_id_of` 会因为文件名不是 32 位十六进制而抛错，
+        整个类别列表跟着 500。
+        """
         directory = self.category_dir(img_key)
         try:
             names = [
                 entry.name
                 for entry in os.scandir(directory)
-                if entry.is_file() and entry.name.endswith(GIF_SUFFIX)
+                if entry.is_file()
+                and entry.name.endswith(GIF_SUFFIX)
+                and is_md5(entry.name[: -len(GIF_SUFFIX)])
             ]
         except OSError:
             return []
@@ -394,7 +401,11 @@ class PickOneStore:
     # ---------- 统计 ----------
 
     def summary(self) -> dict[str, Any]:
-        """全局概览：类别数、图片数、待补 OCR 数量等。"""
+        """全局概览：类别数、图片数、待补 OCR 数量等。
+
+        刻意不含 lib_dir：这个结构会发给任何登录用户，而绝对路径属于服务端
+        内部信息（需要路径的地方只有管理台的 /admin/overview）。
+        """
         categories = self.list_categories()
         total_images = 0
         missing_ocr = 0
@@ -407,7 +418,6 @@ class PickOneStore:
             "category_count": len(categories),
             "image_count": total_images,
             "missing_ocr": missing_ocr,
-            "lib_dir": str(self.lib_dir),
             "lib_available": self.lib_dir.is_dir(),
         }
 
@@ -568,15 +578,20 @@ class PickOneStore:
             raise ValidationError("类别标识只能包含字母、数字、下划线和短横线，且不能以双下划线开头")
         if text in (AUDIT_DIRNAME, PARSER_FILENAME, CONFIG_FILENAME):
             raise ValidationError(f"类别标识不能是保留名 {text}")
-        if text in self.load_categories():
-            raise ValidationError(f"类别标识已存在: {text}")
+        # 类别标识同时也是目录名，而 Windows / macOS 的文件系统不区分大小写：
+        # 「PICKONE」和已有的「PickOne」会落到同一个目录，config.json 里就会出现
+        # 两个指向同一份数据的键。所以这里按大小写无关比较，和别名的规则一致。
+        folded = text.casefold()
+        for existing in self.load_categories():
+            if existing.casefold() == folded:
+                raise ValidationError(f"类别标识已存在（大小写不同）: {existing}")
         # Windows 保留设备名
         reserved = {
             "con", "prn", "aux", "nul",
             *(f"com{index}" for index in range(1, 10)),
             *(f"lpt{index}" for index in range(1, 10)),
         }
-        if text.casefold() in reserved:
+        if folded in reserved:
             raise ValidationError(f"类别标识不能是系统保留名: {text}")
         return text
 
