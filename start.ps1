@@ -102,37 +102,6 @@ function Get-NewestWriteTime([string[]]$paths) {
     return $newest
 }
 
-function Get-DuplicatePackageCopies([string]$package) {
-    # Two installed copies of vue / vue-router produce a bundle that *runs* but has two
-    # sets of Symbol() injection keys: install() provides one set, useRoute()/useRouter()
-    # look up the other, inject() returns undefined and any component reading route.path
-    # dies. The bundle looks normal otherwise, so nothing else catches it.
-    $root = Join-Path $webDir ('node_modules\' + $package.Replace('/', '\'))
-    if (-not (Test-Path $root)) { return @() }
-    $dirs = @((Get-Item $root).FullName)
-    $nested = @(Get-ChildItem (Join-Path $webDir 'node_modules') -Recurse -Filter 'package.json' -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.DirectoryName -like "*\node_modules\$($package.Replace('/', '\'))" -and $_.DirectoryName -ne $dirs[0] } |
-        Select-Object -ExpandProperty DirectoryName -Unique)
-    return @($dirs + $nested | Select-Object -Unique)
-}
-
-# ---- dependency sanity: duplicate vue / vue-router copies silently break routing ----
-if (Test-Path (Join-Path $webDir 'node_modules')) {
-    foreach ($package in 'vue-router', 'vue') {
-        $copies = @(Get-DuplicatePackageCopies $package)
-        if ($copies.Count -gt 1) {
-            Write-Host "[!] $($copies.Count) copies of '$package' are installed:" -ForegroundColor Yellow
-            $copies | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-            Write-Host '    A bundle built with duplicates provides one set of injection symbols and' -ForegroundColor Yellow
-            Write-Host '    looks up another, so useRoute()/useRouter() return undefined at runtime' -ForegroundColor Yellow
-            Write-Host "    (symptom: TypeError ... reading 'path' after login). Fix it with:" -ForegroundColor Yellow
-            Write-Host '      cd web; Remove-Item node_modules -Recurse -Force; git checkout -- package-lock.json; npm ci' -ForegroundColor Yellow
-            Write-Host '    Then re-run:  .\start.ps1 -Rebuild' -ForegroundColor Yellow
-            exit 1
-        }
-    }
-}
-
 if (-not (Test-Path $venvPython)) {
     Write-Host '[x] .venv not found. Run "uv sync" first.' -ForegroundColor Red
     exit 1

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import { session } from '@/stores/session'
+import { currentPlugin, pluginBySlug } from '@/plugins/registry'
 import OBotLogo from '@/components/OBotLogo.vue'
 
 const props = defineProps({
@@ -14,7 +15,7 @@ const props = defineProps({
 const route = useRoute()
 const router = useRouter()
 
-const APP_VERSION = '0.1.0'
+const APP_VERSION = '0.2.0'
 
 /** logo 尺寸跟随视口（要响应 resize，不能直接读 window.innerWidth） */
 const narrow = ref(false)
@@ -34,15 +35,23 @@ onUnmounted(() => {
 })
 
 /** OBot-ACM 自己的版本号，从后端读（后端直接读它的源码常量）。 */
-const versions = ref({ obot: null, pickone: null, commit: null })
+const versions = ref({})
 
 const versionLabel = computed(() => versions.value.obot ?? `v${APP_VERSION}`)
+
+/** 插件回报的上游模块版本，例如 PickOne 的模块版本号。 */
+const moduleVersions = computed(() =>
+  Object.entries(versions.value)
+    .filter(([key]) => !['obot', 'obot_base', 'commit', 'obot_ep'].includes(key))
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${pluginBySlug(key)?.manifest.name ?? key} ${value}`),
+)
 
 const versionTitle = computed(() => {
   const parts = [`本工具 OBot-EP v${APP_VERSION}`]
   if (versions.value.obot) parts.push(`OBot-ACM ${versions.value.obot}`)
   if (versions.value.commit) parts.push(`commit ${versions.value.commit}`)
-  if (versions.value.pickone) parts.push(`PickOne 模块 ${versions.value.pickone}`)
+  parts.push(...moduleVersions.value)
   return parts.join(' · ')
 })
 
@@ -51,43 +60,35 @@ onMounted(async () => {
     // /meta/info 是登录后才读得到的完整版本信息（含 commit）；
     // 公开的 /meta/versions 只给版本号，不带 commit。
     const data = await api.meta()
-    versions.value = data.versions ?? versions.value
+    versions.value = data.versions ?? {}
   } catch {
     /* 读不到就只显示本工具版本 */
   }
 })
 
-const TOOL_NAMES = {
-  '': 'OBot\'s Endpoint',
-  '/pickone': 'PickOne 表情包',
-}
+/**
+ * 导航栏完全由插件注册表驱动：进到哪个工具就显示哪个工具的 nav / adminNav。
+ * 加一个工具不需要改这个文件。
+ */
+const CORE_NAV = [{ path: '/', label: '工具', icon: 'Menu' }]
 
-const TOOL_NAV = {
-  '': [{ path: '/', label: '工具', icon: 'Menu' }],
-  '/pickone': [
-    { path: '/pickone', label: '所有表情', icon: 'Grid' },
-    { path: '/pickone/submissions', label: '我的提交', icon: 'Tickets' },
-  ],
-}
-
-const ADMIN_NAV = [
-  { path: '/pickone/review', label: '审核台', icon: 'Stamp', badge: true },
-  { path: '/pickone/users', label: '账号管理', icon: 'User' },
-  { path: '/pickone/logs', label: '操作日志', icon: 'Document' },
+/** 账号与审计日志是框架能力，管理员在任何页面都能进 */
+const CORE_ADMIN_NAV = [
+  { path: '/admin/users', label: '账号管理', icon: 'User' },
+  { path: '/admin/logs', label: '操作日志', icon: 'Document' },
 ]
 
-const toolPrefix = computed(
-  () =>
-    Object.keys(TOOL_NAMES)
-      .filter((prefix) => prefix && route.path.startsWith(prefix))
-      .sort((a, b) => b.length - a.length)[0] ?? '',
-)
+const activePlugin = computed(() => currentPlugin(route.path))
 
-const toolName = computed(() => TOOL_NAMES[toolPrefix.value])
+const toolName = computed(() => activePlugin.value?.manifest.name ?? "OBot's Endpoint")
+
+const toolPrefix = computed(() => activePlugin.value?.manifest.home ?? '')
 
 const navItems = computed(() => {
-  const items = [...(TOOL_NAV[toolPrefix.value] ?? [])]
-  if (toolPrefix.value && session.isAdmin.value) items.push(...ADMIN_NAV)
+  const items = [...(activePlugin.value?.manifest.nav ?? CORE_NAV)]
+  if (session.isAdmin.value) {
+    items.push(...CORE_ADMIN_NAV, ...(activePlugin.value?.manifest.adminNav ?? []))
+  }
   return items
 })
 

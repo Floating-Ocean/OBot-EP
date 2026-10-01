@@ -1,4 +1,11 @@
-"""管理员路由：审核、一键应用、账号管理、审计日志。"""
+"""框架级管理路由：审核队列与审核动作、账号管理、审计日志。
+
+这里只碰「提交单」这一层数据结构，不碰任何具体工具的数据文件 —— 所以它对
+所有插件通用，新增工具不需要在这里加任何东西。提交单用 `plugin` 参数过滤。
+
+真正写盘（一键应用 / 冲突裁定 / 数据体检）属于「这个工具的数据长什么样」，
+由插件在 `/api/plugins/<slug>/admin/` 下自己提供，见 plugins/*/api/admin.py。
+"""
 
 from __future__ import annotations
 
@@ -6,26 +13,20 @@ import sqlite3
 
 from fastapi import APIRouter, HTTPException, Query, status
 
-from .. import config
-from ..changes import apply_approved, build_apply_plan, resolve_conflict
 from ..repository import (
     ROLE_ADMIN,
     STATUS_APPROVED,
     STATUS_CONFLICT,
     STATUS_PENDING,
     ConflictError,
-    Repository,
 )
 from ..schemas import (
-    ApplyRequest,
-    ConflictResolveRequest,
     ReviewBatchRequest,
     ReviewRequest,
     UserCreateRequest,
     UserUpdateRequest,
 )
-from ..store import StoreError, ValidationError
-from .deps import AdminUser, Repo, Store
+from .deps import AdminUser, Repo
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -34,6 +35,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 def review_queue(
     repo: Repo,
     admin: AdminUser,
+    plugin: str = Query(default="", max_length=64, description="只看某个工具的提交单"),
     status_filter: str = Query(
         default="pending",
         alias="status",
@@ -48,6 +50,7 @@ def review_queue(
     if status_filter != "all":
         kwargs["status"] = status_filter
     items, total = repo.list_submissions(
+        plugin=plugin or None,
         img_key=img_key or None,
         limit=page_size,
         offset=(page - 1) * page_size,
@@ -58,7 +61,7 @@ def review_queue(
         "page": page,
         "page_size": page_size,
         "items": [item.to_dict() for item in items],
-        "counts": repo.count_by_status(),
+        "counts": repo.count_by_status(plugin or None),
     }
 
 
@@ -156,153 +159,6 @@ def unreview(submission_id: int, repo: Repo, admin: AdminUser) -> dict:
         is_admin=True,
     )
     return {"submission": updated.to_dict()}
-
-
-@router.get("/apply/preview")
-def apply_preview(repo: Repo, store: Store, admin: AdminUser) -> dict:
-    """应用前的 dry-run：列出将要写入的内容与冲突。"""
-    return _build_apply_preview(repo, store)
-
-
-def _build_apply_preview(repo: Repository, store) -> dict:
-    submissions = repo.list_approved_submissions()
-    if not submissions:
-        return {
-            "submissions": 0,
-            "image_changes": [],
-            "category_entries": [],
-            "conflicts": [],
-            "new_keys": [],
-            "lib_dir": str(store.lib_dir),
-        }
-
-    plan = build_apply_plan(store, submissions)
-
-    image_changes = [
-        {
-            "img_key": img_key,
-            "count": len(items),
-            "items": [
-                {"name": item["name"], "field": item["field"], "value": item["value"]}
-                for item in items
-            ],
-        }
-        for img_key, items in plan.image_changes.items()
-    ]
-
-    return {
-        "submissions": len(plan.applied_ids),
-        "image_changes": image_changes,
-        "category_entries": [
-            {"img_key": img_key, "entry": entry}
-            for img_key, entry in plan.category_entries.items()
-        ],
-        "new_keys": plan.new_keys,
-        "conflicts": [conflict.to_dict() for conflict in plan.conflicts],
-        "lib_dir": str(store.lib_dir),
-    }
-
-
-@router.get("/conflicts")
-def list_conflicts(
-    repo: Repo,
-    admin: AdminUser,
-    page: int = Query(default=1, ge=1, le=1_000_000),
-    page_size: int = Query(default=20, ge=1, le=100),
-) -> dict:
-    """列出所有挂起的冲突，附三方对比信息。"""
-    items, total = repo.list_submissions(
-        status=STATUS_CONFLICT, limit=page_size, offset=(page - 1) * page_size
-    )
-    return {
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "items": [item.to_dict() for item in items],
-        "counts": repo.count_by_status(),
-    }
-
-
-@router.post("/conflicts/{submission_id}/resolve")
-def resolve(
-    submission_id: int,
-    payload: ConflictResolveRequest,
-    repo: Repo,
-    store: Store,
-    admin: AdminUser,
-) -> dict:
-    """裁定冲突：keep_new=true 保留提交新值并立即写入，false 丢弃提交。"""
-    from ..changes import ApplyConflictError
-
-    try:
-        result = resolve_conflict(
-            repo, store, submission_id, keep_new=payload.keep_new, reviewer_id=admin.id
-        )
-    except KeyError as error:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="提交单不存在") from error
-    except ApplyConflictError as error:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-    except (StoreError, ValidationError) as error:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    except OSError:
-        # 底层异常信息里带着服务端的绝对路径，不往响应里放
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="写盘失败（权限或磁盘问题），请查看服务端日志",
-        ) from None
-
-    repo.add_log(
-        actor_id=admin.id,
-        username=admin.username,
-        action="resolve_conflict",
-        detail=(
-            f"冲突裁定 #{submission_id}："
-            + ("保留提交新值并已写入" if payload.keep_new else "丢弃提交，保留磁盘现值")
-        ),
-        is_admin=True,
-    )
-    return result
-
-
-@router.post("/apply")
-def apply_changes(payload: ApplyRequest, repo: Repo, store: Store, admin: AdminUser) -> dict:
-    """一键应用：把已审核的改动写回 OBot-ACM 的 config.json / parser.json。"""
-    if payload.dry_run:
-        return _build_apply_preview(repo, store)
-
-    if not config.PICK_ONE_DIR.is_dir():
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Pick-One 数据目录不存在: {config.PICK_ONE_DIR}",
-        )
-
-    try:
-        result = apply_approved(repo, store)
-    except (StoreError, ValidationError) as error:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
-    except OSError:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="写盘失败（权限或磁盘问题），请查看服务端日志",
-        ) from None
-
-    repo.add_log(
-        actor_id=admin.id,
-        username=admin.username,
-        action="apply_changes",
-        detail=(
-            f"应用 {result['submissions']} 条提交：图片字段 {result['applied_images']} 处，"
-            f"类别 {result['applied_categories']} 个，冲突 {len(result['conflicts'])} 条"
-        ),
-        is_admin=True,
-    )
-    return result
-
-
-@router.get("/integrity")
-def integrity(store: Store, admin: AdminUser) -> dict:
-    """数据体检：图片和 parser.json 是否对齐。"""
-    return store.check_integrity()
 
 
 @router.get("/logs")
@@ -452,16 +308,18 @@ def delete_user(user_id: int, repo: Repo, admin: AdminUser) -> dict:
 
 
 @router.get("/overview")
-def overview(repo: Repo, store: Store, admin: AdminUser) -> dict:
-    """管理台首页需要的全部计数。"""
+def overview(repo: Repo, admin: AdminUser) -> dict:
+    """管理台首页需要的全部计数（与具体工具无关）。
+
+    插件自己的「数据目录在不在」由 `GET /api/plugins` 的 health 字段给。
+    """
     _, pending_total = repo.list_submissions(status=STATUS_PENDING, limit=1)
     _, approved_total = repo.list_submissions(status=STATUS_APPROVED, limit=1)
     return {
         "submission_counts": repo.count_by_status(),
         "pending_total": pending_total,
         "approved_total": approved_total,
+        "conflict_total": repo.count_by_status()[STATUS_CONFLICT],
         "user_total": repo.count_users(),
         "admin_total": repo.count_admins(),
-        "lib_dir": str(store.lib_dir),
-        "lib_available": config.PICK_ONE_DIR.is_dir(),
     }

@@ -15,13 +15,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
+
+# 错误类型必须来自框架：核心已经给它们装好了异常处理器，
+# 插件自己再定义一套只会得到 500 而不是 400/404。
+from server.errors import NotFoundError, StoreError, ValidationError
 
 from . import config
 from .hashing import GIF_SUFFIX, hash_id_of, is_md5, new_legacy_entry
@@ -40,17 +46,24 @@ MAX_ALIAS_LENGTH = 64
 MAX_ALIASES = 64
 MAX_CATEGORY_ID_LENGTH = 64
 
-
-class StoreError(Exception):
-    """数据层可预期的错误（路径非法、结构不对等）。"""
-
-
-class NotFoundError(StoreError):
-    pass
-
-
-class ValidationError(StoreError):
-    pass
+__all__ = [
+    "NotFoundError",
+    "StoreError",
+    "ValidationError",
+    "PARSER_FILENAME",
+    "CONFIG_FILENAME",
+    "AUDIT_DIRNAME",
+    "MAX_OCR_TEXT_LENGTH",
+    "MAX_COMMENT_LENGTH",
+    "MAX_COMMENTS_PER_IMAGE",
+    "MAX_LIKES_PER_REQUEST",
+    "MAX_ALIAS_LENGTH",
+    "MAX_ALIASES",
+    "MAX_CATEGORY_ID_LENGTH",
+    "Category",
+    "ImageStat",
+    "PickOneStore",
+]
 
 
 @dataclass
@@ -90,11 +103,9 @@ def _atomic_write_json(path: Path, data: Any) -> None:
             os.fsync(handle.fileno())
         os.replace(tmp_path, path)
     finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        # 成功时 os.replace 已经把临时文件搬走了，unlink 必然失败；这里只是兜底清理
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -102,7 +113,7 @@ def _read_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
     try:
-        with open(path, "r", encoding="utf-8") as handle:
+        with open(path, encoding="utf-8") as handle:
             text = handle.read()
     except OSError:
         return default

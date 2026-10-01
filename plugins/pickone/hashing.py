@@ -14,7 +14,8 @@ import warnings
 
 from PIL import Image, ImageFile
 
-from . import config
+# 缩略图缓存在 DATA_DIR/thumbnails 下，那是框架级的目录，所以这里读框架配置。
+from server import config
 
 _BASE62_CHARSET = string.ascii_letters + string.digits
 _CHAR_TO_INDEX = {char: index for index, char in enumerate(_BASE62_CHARSET)}
@@ -167,5 +168,5 @@ def _render_thumbnail(img: Image.Image, max_side: int) -> bytes:
 
 def thumbnail_cache_key(path_text: str, mtime_ns: int, size: int) -> str:
     """缩略图缓存文件名，源文件变化时自动失效。"""
-    raw = f"{path_text}|{mtime_ns}|{size}".encode("utf-8")
+    raw = f"{path_text}|{mtime_ns}|{size}".encode()
     return hashlib.sha1(raw).hexdigest()

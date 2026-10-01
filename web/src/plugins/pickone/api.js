@@ -1,0 +1,68 @@
+import http from '@/api/http'
+
+/** 本插件的后端前缀。后端由 `plugins/pickone/plugin.py` 提供同样的 slug。 */
+const BASE = '/plugins/pickone'
+
+/** 缩略图/原图是 <img src>，不走 axios，所以这里直接拼 URL。 */
+export const thumbUrl = (imgKey, name) =>
+  `/api${BASE}/images/${encodeURIComponent(imgKey)}/thumb/${encodeURIComponent(name)}`
+export const rawUrl = (imgKey, name) =>
+  `/api${BASE}/images/${encodeURIComponent(imgKey)}/raw/${encodeURIComponent(name)}`
+
+/**
+ * PickOne 插件自己的接口。
+ *
+ * 这些方法会被 `@/api` 平铺成 `api.categories()` 等，同时也挂在
+ * `api.pickone.categories()` 上。命名尽量带上工具语义词，避免和别的插件重名。
+ */
+const pickoneApi = {
+  // ---- 类别 ----
+  categories: () => http.get(`${BASE}/categories`),
+  categorySummary: () => http.get(`${BASE}/categories/summary`),
+  categoryCounts: () => http.get(`${BASE}/categories/counts`),
+  category: (imgKey) => http.get(`${BASE}/categories/${encodeURIComponent(imgKey)}`),
+
+  // ---- 图片 ----
+  images: (imgKey, params) => http.get(`${BASE}/images/${encodeURIComponent(imgKey)}`, { params }),
+  imageStats: (imgKey) => http.get(`${BASE}/images/${encodeURIComponent(imgKey)}/stats`),
+  image: (imgKey, name) =>
+    http.get(`${BASE}/images/${encodeURIComponent(imgKey)}/item/${encodeURIComponent(name)}`),
+  lookupHashId: (imgKey, hashId) =>
+    http.get(`${BASE}/images/${encodeURIComponent(imgKey)}/hash-id/${encodeURIComponent(hashId)}`),
+  thumbUrl,
+  rawUrl,
+
+  // ---- 提交 ----
+  submissions: (params) => http.get(`${BASE}/submissions`, { params }),
+  mySubmissions: () => http.get(`${BASE}/submissions/mine`),
+  submit: (imgKey, type, payload) =>
+    http.post(`${BASE}/submissions`, payload, { params: { img_key: imgKey, type } }),
+  submitBatch: (imgKey, payload) =>
+    http.post(`${BASE}/submissions/batch`, payload, { params: { img_key: imgKey } }),
+  withdraw: (id) => http.delete(`${BASE}/submissions/${id}`),
+
+  // ---- 管理：审核队列 + 本插件专属的写盘动作 ----
+  /**
+   * 审核队列（框架接口 `/api/admin/queue` 的必要包装）。
+   *
+   * 队列本身是通用的（它只读提交单表），所以实现在框架里；这里只是把
+   * `plugin=pickone` 注入进去，省得每个调用点都记得写。
+   * 视图里请用 `api.pickone.reviewQueue()` —— 这个方法和框架的同名方法重名，
+   * 平铺的 `api.reviewQueue()` 是框架那份（返回所有工具的提交单）。
+   */
+  reviewQueue: (params) => http.get('/admin/queue', { params: { ...params, plugin: 'pickone' } }),
+  applyPreview: () => http.get(`${BASE}/admin/apply/preview`),
+  /**
+   * 真正写盘。不要再传参数：老签名是 `apply(dryRun)`，写成 `api.apply({})` 会让
+   * dry_run 变成真值，结果只做了预览没写盘。要预览请用 applyPreview()。
+   */
+  apply: () => http.post(`${BASE}/admin/apply`, { dry_run: false }),
+  conflicts: (params) => http.get(`${BASE}/admin/conflicts`, { params }),
+  resolveConflict: (id, keepNew) =>
+    http.post(`${BASE}/admin/conflicts/${id}/resolve`, { keep_new: keepNew }),
+  integrity: () => http.get(`${BASE}/admin/integrity`),
+  /** 审核台首页：本插件的计数 + 数据目录是否可用 */
+  overview: () => http.get(`${BASE}/admin/overview`),
+}
+
+export default pickoneApi

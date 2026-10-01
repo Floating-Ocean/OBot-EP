@@ -1,11 +1,14 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { session } from '@/stores/session'
+import { pluginRoutes } from '@/plugins/registry'
 
 /**
- * 这个站点是「工具集合」：/ 是工具首页，每个工具挂在 /<工具名> 下。
- * 之后加新工具只需要往 TOOLS 与 routes 里各加一项。
+ * 这个站点是「工具集合」：`/` 是工具首页，每个工具挂在 `/<工具名>` 下。
+ *
+ * **加新工具不需要改这个文件** —— 插件路由由 `@/plugins/registry` 自动发现
+ * （见 `web/src/plugins/registry.js`）。这里只放框架自己的页面。
  */
-const routes = [
+const coreRoutes = [
   {
     path: '/login',
     name: 'login',
@@ -18,42 +21,24 @@ const routes = [
     component: () => import('@/views/ToolHubView.vue'),
     meta: { title: '工具' },
   },
+  // 账号与审计日志是框架能力（所有工具共用一套账号），所以不挂在任何工具下
   {
-    path: '/pickone',
-    name: 'pickone-home',
-    component: () => import('@/views/pickone/PickOneCategoriesView.vue'),
-    meta: { title: 'Pick-one 类别' },
-  },
-  {
-    path: '/pickone/categories/:imgKey',
-    name: 'pickone-category',
-    component: () => import('@/views/pickone/PickOneCategoryView.vue'),
-    meta: { title: 'Pick-one 类别详情' },
-  },
-  {
-    path: '/pickone/submissions',
-    name: 'pickone-submissions',
-    component: () => import('@/views/pickone/PickOneSubmissionsView.vue'),
-    meta: { title: '我的提交' },
-  },
-  {
-    path: '/pickone/review',
-    name: 'pickone-review',
-    component: () => import('@/views/pickone/PickOneReviewView.vue'),
-    meta: { title: '审核台', admin: true },
-  },
-  {
-    path: '/pickone/users',
-    name: 'pickone-users',
-    component: () => import('@/views/pickone/PickOneUsersView.vue'),
+    path: '/admin/users',
+    name: 'admin-users',
+    component: () => import('@/views/admin/AdminUsersView.vue'),
     meta: { title: '账号管理', admin: true },
   },
   {
-    path: '/pickone/logs',
-    name: 'pickone-logs',
-    component: () => import('@/views/pickone/PickOneLogsView.vue'),
+    path: '/admin/logs',
+    name: 'admin-logs',
+    component: () => import('@/views/admin/AdminLogsView.vue'),
     meta: { title: '操作日志', admin: true },
   },
+]
+
+const routes = [
+  ...coreRoutes,
+  ...pluginRoutes,
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',

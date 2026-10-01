@@ -1,4 +1,9 @@
-"""健康检查与运行期信息。"""
+"""健康检查与运行期信息。
+
+版本号由两段拼出来：本工具自己的版本 + 各插件回报的「上游模块版本」。
+插件通过 `BasePlugin.versions()` 贡献自己的那一段（例如 PickOne 的模块版本），
+所以这里不需要认识任何一个具体工具。
+"""
 
 from __future__ import annotations
 
@@ -7,14 +12,13 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
-from .. import config
-from .deps import CurrentUser, Repo, Store
+from .. import __version__, config
+from .deps import CurrentUser, Registry, Repo
 
 router = APIRouter(tags=["meta"])
 
-# 从 OBot-ACM 源码里读版本号的正则
+# 从 OBot-ACM 源码里读核心版本号的正则（所有插件共用）
 _CORE_VERSION_RE = re.compile(r'core_version\s*=\s*"([^"]+)"')
-_MODULE_VERSION_RE = re.compile(r'name="Pick-One",\s*version="([^"]+)"')
 
 
 def _read_text(path) -> str:
@@ -63,16 +67,16 @@ def _head_short_hash(root) -> str | None:
     return sha[:7] if len(sha) >= 7 and all(c in "0123456789abcdef" for c in sha[:7].lower()) else None
 
 
-def bot_versions() -> dict[str, str | None]:
+def bot_versions(registry: Registry) -> dict[str, str | None]:
     """读 OBot-ACM 自己的版本号与 commit，读不到就返回 None（前端显示 unknown）。
 
-    刻意不去 import Bot 的模块（会拉起一大堆重依赖），只在源码里找两个常量。
+    刻意不去 import Bot 的模块（会拉起一大堆重依赖），只在源码里找常量；
+    各插件维护的那个模块版本由插件自己解析，这里只负责合并。
     版本号形如 v5.0.0-10b5ce3，后缀是 OBot-ACM 当前 HEAD 的短哈希。
     """
     root = config.ACM_ROOT_DIR
 
     core = _CORE_VERSION_RE.search(_read_text(root / "src" / "core" / "constants.py"))
-    module = _MODULE_VERSION_RE.search(_read_text(root / "src" / "module" / "stuff" / "pick_one.py"))
     sha = _head_short_hash(root)
 
     core_version = core.group(1) if core else None
@@ -82,19 +86,20 @@ def bot_versions() -> dict[str, str | None]:
     return {
         "obot": core_version,
         "obot_base": core.group(1) if core else None,
-        "pickone": module.group(1) if module else None,
         "commit": sha,
+        **registry.versions(),
     }
 
 
-def _public_versions() -> dict[str, str | None]:
+def _public_versions(registry: Registry) -> dict[str, str | None]:
     """公开给未登录访客的版本信息：只有版本号，没有 commit。
 
     页面上的版本标签用得上，而 commit 短哈希等于把「所维护仓库的确切代码版本」
     告诉任何访客 —— 那是漏洞探测的现成输入，没必要公开。
     """
-    data = bot_versions()
-    return {"obot_ep": "0.1.0", "obot": data["obot"], "pickone": data["pickone"]}
+    data = bot_versions(registry)
+    data.pop("commit", None)
+    return {"obot_ep": __version__, **data}
 
 
 @router.get("/health")
@@ -107,24 +112,23 @@ def health() -> dict:
 
 
 @router.get("/meta/versions")
-def versions() -> dict:
-    """版本号：本工具 + 所维护的 OBot-ACM。
+def versions(registry: Registry) -> dict:
+    """版本号：本工具 + 所维护的 OBot-ACM 及其各模块。
 
     无需登录（页面底部要显示），所以只给版本号，不给 commit（见 _public_versions）。
     """
-    return _public_versions()
+    return _public_versions(registry)
 
 
 @router.get("/meta/info")
-def info(repo: Repo, store: Store, user: CurrentUser) -> dict:
+def info(repo: Repo, registry: Registry, user: CurrentUser) -> dict:
     counts = repo.count_by_status()
     return {
         "user": user.to_dict(),
-        # 只给「目录在不在」，不给绝对路径：路径属于服务端内部信息
-        "lib_available": store.lib_dir.is_dir(),
+        "plugins": registry.manifests(),
         "allow_register": config.ALLOW_REGISTER,
         "submission_counts": counts,
         "roles": ["user", "admin"],
         # 登录用户可以看到完整版本信息（含 commit）
-        "versions": {"obot_ep": "0.1.0", **bot_versions()},
+        "versions": {"obot_ep": __version__, **bot_versions(registry)},
     }

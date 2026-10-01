@@ -1,47 +1,63 @@
-"""运行期配置：数据目录、数据库、密钥等。
+"""框架级运行期配置：数据目录、数据库、密钥等。
 
 所有配置都可以通过环境变量覆盖，默认值面向本机开发。
+**具体工具（插件）自己的配置不要写在这里** —— 那会让核心知道插件的存在。
+插件的配置放在 `plugins/<slug>/config.py`，需要复用这里的路径时 import 即可。
 """
 
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# 所有接口的公共前缀（前端 axios baseURL 与 Vite 代理都按它走）
+API_PREFIX = "/api"
+
+# 插件根目录：每个子包是一个工具。名字固定为 plugins，包名与路径必须一致。
+PLUGINS_DIR = BASE_DIR / "plugins"
+
+# 老提交单没有 plugin 列，建库迁移时把它们认领给这个插件。
+# 全新部署用不到它，改这里只在「已经跑过一段时间的库」上有意义。
+# 这个值会被拼进 ALTER TABLE 的 DEFAULT 子句（SQLite 不允许那里用占位符），
+# 所以先卡死字符集，避免配置值变成 SQL 注入面。
+LEGACY_PLUGIN_SLUG = os.environ.get("OBOT_EP_LEGACY_PLUGIN", "pickone").strip() or "pickone"
+if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", LEGACY_PLUGIN_SLUG):
+    raise ValueError(f"OBOT_EP_LEGACY_PLUGIN is not a valid slug: {LEGACY_PLUGIN_SLUG!r}")
 
 _DEFAULT_ACM_LIB = BASE_DIR.parent / "OBot-ACM" / "lib"
 # OBot-ACM 仓库根目录，用来读它自己的版本号
 DEFAULT_ACM_ROOT = BASE_DIR.parent / "OBot-ACM"
 
 
-def _env_path(name: str, default: Path) -> Path:
+def env_path(name: str, default: Path) -> Path:
+    """读一个「路径型」环境变量。插件配置也用这个，所以它是公开的。"""
     raw = os.environ.get(name, "").strip()
     return Path(raw).expanduser().resolve() if raw else default
 
 
-# OBot-ACM 的 lib 目录，Pick-One 数据（config.json / parser.json / *.gif）都在这里
-ACM_LIB_DIR = _env_path("OBOT_ACM_LIB_DIR", _DEFAULT_ACM_LIB)
+# OBot-ACM 的 lib 目录。插件的数据目录（如 Pick-One）都挂在它下面，
+# 所以这个「上游仓库在哪」属于框架级配置。
+ACM_LIB_DIR = env_path("OBOT_ACM_LIB_DIR", _DEFAULT_ACM_LIB)
 
 # OBot-ACM 的源码根目录（用来读它的版本号），默认是 lib 的同级
-ACM_ROOT_DIR = _env_path("OBOT_ACM_ROOT_DIR", DEFAULT_ACM_ROOT)
+ACM_ROOT_DIR = env_path("OBOT_ACM_ROOT_DIR", DEFAULT_ACM_ROOT)
 
 # 覆盖 OBot-ACM 版本号后面的 commit 后缀（不放 git 仓库时可以用）
 ACM_VERSION_SUFFIX = os.environ.get("OBOT_ACM_VERSION_SUFFIX", "").strip()
 
-# Pick-One 模块目录
-PICK_ONE_DIR = _env_path("OBOT_PICK_ONE_DIR", ACM_LIB_DIR / "Pick-One")
-
 # 本地数据库（账号、提交单、审计日志）
-DATA_DIR = _env_path("OBOT_EP_DATA_DIR", BASE_DIR / "data")
-DB_PATH = _env_path("OBOT_EP_DB_PATH", DATA_DIR / "obot_ep.sqlite3")
+DATA_DIR = env_path("OBOT_EP_DATA_DIR", BASE_DIR / "data")
+DB_PATH = env_path("OBOT_EP_DB_PATH", DATA_DIR / "obot_ep.sqlite3")
 
 # 缩略图缓存目录
-THUMB_DIR = _env_path("OBOT_EP_THUMB_DIR", DATA_DIR / "thumbnails")
+THUMB_DIR = env_path("OBOT_EP_THUMB_DIR", DATA_DIR / "thumbnails")
 
 # 前端构建产物
-FRONTEND_DIST = _env_path("OBOT_EP_FRONTEND_DIST", BASE_DIR / "web" / "dist")
+FRONTEND_DIST = env_path("OBOT_EP_FRONTEND_DIST", BASE_DIR / "web" / "dist")
 
 # 会话签名密钥；未配置时随机生成（进程重启后所有登录失效）
 SESSION_SECRET_FROM_ENV = bool(os.environ.get("OBOT_EP_SECRET"))

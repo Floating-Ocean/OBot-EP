@@ -7,6 +7,11 @@
 #
 # NOTE: keep every message ASCII/English (no CJK fonts in some terminals).
 
+# 这个口令是给一次性的本机测试服务用的，而且必须以明文交给子进程（走环境变量），
+# 换成 SecureString 也只是再转回来 —— 所以在这里定向豁免这条规则，不动参数类型。
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+    'PSAvoidUsingPlainTextForPassword', 'Password',
+    Justification = 'Throwaway password for a temporary localhost test server; the child process needs it as plaintext.')]
 param(
     [int]$Port = 8123,
     [string]$Password = 'lanadmin12345'
@@ -49,17 +54,17 @@ function Invoke-Api {
         [hashtable]$Headers = @{},
         [Microsoft.PowerShell.Commands.WebRequestSession]$Session
     )
-    $args = @{
+    $splat = @{
         Uri             = $Url
         Method          = $Method
         UseBasicParsing = $true
         TimeoutSec      = 10
         Headers         = $Headers
     }
-    if ($Body) { $args['Body'] = $Body; $args['ContentType'] = 'application/json' }
-    if ($Session) { $args['WebSession'] = $Session }
+    if ($Body) { $splat['Body'] = $Body; $splat['ContentType'] = 'application/json' }
+    if ($Session) { $splat['WebSession'] = $Session }
     try {
-        $r = Invoke-WebRequest @args
+        $r = Invoke-WebRequest @splat
         return @{ Status = [int]$r.StatusCode; Body = $r.Content; Response = $r }
     } catch {
         # PowerShell 7 把错误响应放在 ErrorDetails 上（异常里没有 GetResponseStream）

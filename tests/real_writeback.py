@@ -91,7 +91,7 @@ def main() -> int:
 
             print("\n== Submit ==")
             r = user.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": CATEGORY, "type": "ocr_text"},
                 json={"name": name, "ocr_text": "实机写回验证文本", "note": "Automated check"},
             )
@@ -99,7 +99,7 @@ def main() -> int:
             submission_id = r.json()["submission"]["id"]
 
             r = user.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": CATEGORY, "type": "comments"},
                 json={"name": name, "comments": ["实机核对评论"]},
             )
@@ -115,7 +115,7 @@ def main() -> int:
             check("disk still unchanged after approval", parser_path.read_text(encoding="utf-8") == parser_before)
 
             print("\n== One-click apply ==")
-            r = admin.post("/api/admin/apply", json={})
+            r = admin.post("/api/plugins/pickone/admin/apply", json={})
             result = r.json()
             check("apply succeeded", r.status_code == 200, r.text[:400])
             check("wrote 2 image fields", result["applied_images"] == 2, json.dumps(result, ensure_ascii=False))
@@ -135,7 +135,7 @@ def main() -> int:
             check("no entries added or lost", set(after) == set(original), str(set(after) ^ set(original)))
 
             print("\n== UI read ==")
-            r = user.get(f"/api/images/{CATEGORY}/item/{name}")
+            r = user.get(f"/api/plugins/pickone/images/{CATEGORY}/item/{name}")
             check(
                 "details reflect the new values",
                 r.json()["image"]["ocr_text"] == "实机写回验证文本",
@@ -143,7 +143,7 @@ def main() -> int:
             )
             check("no longer flagged as legacy format", not r.json()["image"]["legacy"])
 
-            r = admin.get("/api/admin/integrity")
+            r = admin.get("/api/plugins/pickone/admin/integrity")
             report = next(item for item in r.json()["categories"] if item["img_key"] == CATEGORY)
             check("integrity report shows alignment", report["parser_without_image"] == 0, json.dumps(report))
 

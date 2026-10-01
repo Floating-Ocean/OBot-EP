@@ -1,15 +1,20 @@
-"""图片浏览与文件服务路由。"""
+"""图片浏览与文件服务路由（挂载于 `/api/plugins/pickone/images`）。"""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
 import threading
 
 from fastapi import APIRouter, HTTPException, Query, status
-from fastapi.responses import FileResponse, Response as RawResponse
+from fastapi.responses import FileResponse
+from fastapi.responses import Response as RawResponse
 
-from .. import config
+# 缩略图缓存目录与上限是框架级配置（所有工具共用一个缓存目录）
+from server import config
+from server.api.deps import CurrentUser, Repo
+
 from ..changes import effective_image, image_pending_changes, load_open_submissions
 from ..hashing import (
     ThumbnailError,
@@ -20,9 +25,9 @@ from ..hashing import (
 )
 from ..palette import accent_of
 from ..store import NotFoundError, PickOneStore, StoreError, ValidationError
-from .deps import CurrentUser, Repo, Store
+from .deps import Store
 
-router = APIRouter(prefix="/images", tags=["images"])
+router = APIRouter(prefix="/images", tags=["pickone-images"])
 
 _GIF_MEDIA_TYPE = "image/gif"
 
@@ -226,10 +231,9 @@ def thumbnail(img_key: str, name: str, store: Store, _user: CurrentUser) -> RawR
             detail="无法生成缩略图（图片格式损坏或不受支持）",
         ) from None
 
-    try:
+    # 缓存写不进去不算失败：这次照样把图发回去，下次请求再重新生成
+    with contextlib.suppress(OSError):
         _write_thumb_cache(cache_path, data)
-    except OSError:
-        pass
 
     return RawResponse(
         content=data,
@@ -273,11 +277,9 @@ def _write_thumb_cache(cache_path, data: bytes) -> None:
             handle.write(data)
         os.replace(tmp_path, cache_path)
     finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        # 成功时临时文件已被搬走；这里清掉失败残留，删不掉也不该影响响应
+        with contextlib.suppress(OSError):
+            tmp_path.unlink()
 
 
 @router.get("/{img_key}/hash-id/{hash_id}")

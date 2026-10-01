@@ -88,7 +88,7 @@ def session_version(password_hash: str) -> str:
     """
     if not password_hash:
         return ""
-    return hashlib.sha256(f"session-v1:{password_hash}".encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(f"session-v1:{password_hash}".encode()).hexdigest()[:16]
 
 
 def create_session_token(user_id: int, username: str, role: str, password_hash: str = "") -> str:

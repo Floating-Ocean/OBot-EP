@@ -29,9 +29,12 @@ os.environ["OBOT_PICK_ONE_DIR"] = str(FIXTURE)
 os.environ["OBOT_EP_DATA_DIR"] = str(DATA_DIR)
 os.environ["OBOT_EP_ADMIN_PASSWORD"] = "admin12345"
 os.environ["OBOT_EP_SECRET"] = "smoke-test-secret"
+# TestClient 不监听任何端口，但不设这一项时应用会按「正在对网络提供服务」处理，
+# 每个 TestClient(app) 都会打一整块明文 HTTP / 开放注册的告警，把输出淹掉
+os.environ["OBOT_EP_BIND_HOST"] = "127.0.0.1"
 
-from PIL import Image  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from PIL import Image  # noqa: E402
 
 from server.app import app  # noqa: E402
 
@@ -162,26 +165,26 @@ def main() -> int:
             check("Wrong password rejected", r.status_code == 401)
 
             print("\n== Browsing ==")
-            r = alice.get("/api/categories")
+            r = alice.get("/api/plugins/pickone/categories")
             body = r.json()
             check("Category list", r.status_code == 200 and len(body["categories"]) == 3, r.text[:200])
             lzh = next(item for item in body["categories"] if item["img_key"] == "lzh")
             check("Image count stats", lzh["image_count"] == 8, str(lzh["image_count"]))
 
-            r = alice.get("/api/categories/summary")
+            r = alice.get("/api/plugins/pickone/categories/summary")
             check(
                 "Missing OCR stats (kepy has 1 image without parser)",
                 r.json()["missing_ocr"] == 1,
                 json.dumps(r.json(), ensure_ascii=False),
             )
 
-            r = alice.get("/api/images/lzh", params={"page_size": 100})
+            r = alice.get("/api/plugins/pickone/images/lzh", params={"page_size": 100})
             items = r.json()["items"]
             check("Image list", r.status_code == 200 and len(items) == 8, r.text[:200])
             check("Legacy string entries detected", any(item["legacy"] for item in items))
             check("Display ID is Base62", all(item["hash_id"] for item in items))
 
-            missing = alice.get("/api/images/kepy").json()["items"]
+            missing = alice.get("/api/plugins/pickone/images/kepy").json()["items"]
             check(
                 "Images missing from parser shown with empty text",
                 missing[0]["ocr_text"] == "" and missing[0]["legacy"],
@@ -191,29 +194,29 @@ def main() -> int:
             name = target["name"]
             original_text = target["ocr_text"]
 
-            r = alice.get(f"/api/images/lzh/thumb/{name}")
+            r = alice.get(f"/api/plugins/pickone/images/lzh/thumb/{name}")
             check("Thumbnail",
                 r.status_code == 200 and r.headers["content-type"] == "image/webp",
                 r.text[:120],
             )
-            r = alice.get(f"/api/images/lzh/raw/{name}")
+            r = alice.get(f"/api/plugins/pickone/images/lzh/raw/{name}")
             check("Original image", r.status_code == 200 and r.content[:3] == b"GIF", str(r.status_code))
 
-            r = alice.get("/api/images/lzh/raw/..%2F..%2Fconfig.json")
+            r = alice.get("/api/plugins/pickone/images/lzh/raw/..%2F..%2Fconfig.json")
             check("Path traversal blocked", r.status_code in (400, 404), str(r.status_code))
 
-            r = alice.get(f"/api/images/lzh/hash-id/{target['hash_id']}")
+            r = alice.get(f"/api/plugins/pickone/images/lzh/hash-id/{target['hash_id']}")
             check(
                 "Reverse lookup by Base62 ID", r.status_code == 200 and r.json()["name"] == name, r.text[:200]
             )
 
-            r = alice.get("/api/images/lzh", params={"q": original_text, "page_size": 100})
+            r = alice.get("/api/plugins/pickone/images/lzh", params={"q": original_text, "page_size": 100})
             check("Search by text", r.json()["total"] >= 1, str(r.json()["total"]))
 
             print("\n== OCR text correction ==")
             new_text = "冒烟测试文本-SMOKE"
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": name, "ocr_text": new_text, "note": "改个错别字"},
             )
@@ -221,13 +224,13 @@ def main() -> int:
             submission_id = r.json()["submission"]["id"]
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": name, "ocr_text": original_text},
             )
             check("Submit identical to current value rejected", r.status_code == 400, r.text[:200])
 
-            r = alice.get("/api/images/lzh", params={"filter": "has_change", "page_size": 100})
+            r = alice.get("/api/plugins/pickone/images/lzh", params={"filter": "has_change", "page_size": 100})
             changed = r.json()["items"]
             check(
                 "Pending changes are listed next to the original value",
@@ -242,7 +245,7 @@ def main() -> int:
 
             check("Disk untouched before review", "SMOKE" not in parser_path.read_text(encoding="utf-8"))
 
-            r = alice.get("/api/submissions", params={"status": "open"})
+            r = alice.get("/api/plugins/pickone/submissions", params={"status": "open"})
             check("My submissions list", r.json()["total"] == 1, r.text[:200])
             check(
                 "Per-user counts are separate from global counts",
@@ -253,7 +256,7 @@ def main() -> int:
             # 管理员给同一张图提修改：两个人应该各占一条，互相不挡
             # 而且别人的在途改动只能看，不能当成自己的修改起点
             admin_view = admin_client.get(
-                "/api/images/lzh", params={"page_size": 100, "q": name.replace(".gif", "")}
+                "/api/plugins/pickone/images/lzh", params={"page_size": 100, "q": name.replace(".gif", "")}
             ).json()["items"][0]
             check(
                 "Other users still see the original value",
@@ -264,7 +267,7 @@ def main() -> int:
             )
 
             r = admin_client.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": name, "ocr_text": "admin-own-text"},
             )
@@ -282,7 +285,7 @@ def main() -> int:
                 f"{admin_submission_id} vs {submission_id}",
             )
 
-            r = admin_client.get("/api/submissions", params={"scope": "mine", "status": "open"})
+            r = admin_client.get("/api/plugins/pickone/submissions", params={"scope": "mine", "status": "open"})
             check(
                 "Admin sees own count, while global counts both",
                 r.json()["total"] == 1 and r.json()["counts"]["pending"] == 2,
@@ -291,11 +294,11 @@ def main() -> int:
             check(
                 "Admin can list everyone's submissions",
                 admin_client.get(
-                    "/api/submissions", params={"scope": "all", "status": "open"}
+                    "/api/plugins/pickone/submissions", params={"scope": "all", "status": "open"}
                 ).json()["total"]
                 == 2,
             )
-            admin_client.delete(f"/api/submissions/{admin_submission_id}")
+            admin_client.delete(f"/api/plugins/pickone/submissions/{admin_submission_id}")
 
             print("\n== Review ==")
             r = admin_client.get("/api/admin/queue", params={"status": "pending"})
@@ -314,7 +317,7 @@ def main() -> int:
             check("Reviewed submission cannot be reviewed again", r.status_code == 409, str(r.status_code))
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": name, "ocr_text": new_text, "note": "再来一次"},
             )
@@ -347,7 +350,7 @@ def main() -> int:
             print("\n== Duplicate submission merge ==")
             first_id = submission_id
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": name, "ocr_text": "第二次修改"},
             )
@@ -355,10 +358,10 @@ def main() -> int:
             check("Back to pending after edit", r.json()["submission"]["status"] == "pending")
 
             print("\n== Category aliases ==")
-            r = alice.get("/api/categories/lzh")
+            r = alice.get("/api/plugins/pickone/categories/lzh")
             new_keys = [*r.json()["category"]["keys"], "smoke_alias"]
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "category"},
                 json={"category_id": "小廖", "keys": new_keys, "note": "加个别名"},
             )
@@ -366,14 +369,14 @@ def main() -> int:
             category_submission_id = r.json()["submission"]["id"]
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "category"},
                 json={"category_id": "小廖", "keys": [*new_keys, "kepy"], "note": "与别的类别冲突"},
             )
             check("Alias conflicting with another category rejected", r.status_code == 400, r.text[:200])
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "__AUDIT__", "type": "category_create"},
                 json={"category_id": "保留名", "keys": ["保留名"], "note": ""},
             )
@@ -381,7 +384,7 @@ def main() -> int:
 
             print("\n== New category ==")
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": NEW_CATEGORY, "type": "category_create"},
                 json={
                     "category_id": "冒烟测试类别",
@@ -392,7 +395,7 @@ def main() -> int:
             check("Submit new category", r.status_code == 201, r.text[:300])
             create_submission_id = r.json()["submission"]["id"]
 
-            r = alice.get("/api/categories")
+            r = alice.get("/api/plugins/pickone/categories")
             check(
                 "Pending draft appears in category list",
                 any(
@@ -410,7 +413,7 @@ def main() -> int:
             )
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "likes"},
                 json={"name": MD5S[1] + ".gif", "likes_delta": 7},
             )
@@ -424,7 +427,7 @@ def main() -> int:
             )
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "likes"},
                 json={"name": MD5S[1] + ".gif", "likes_delta": 11},
             )
@@ -432,7 +435,7 @@ def main() -> int:
 
             # 编辑表单走的是 /batch（前端实际调用的接口），点赞增量必须同样能提交
             r = alice.post(
-                "/api/submissions/batch",
+                "/api/plugins/pickone/submissions/batch",
                 params={"img_key": "lzh"},
                 json={"name": MD5S[3] + ".gif", "likes_delta": 4, "note": "batch 路径"},
             )
@@ -443,7 +446,7 @@ def main() -> int:
             )
             batch_likes = next(
                 item
-                for item in alice.get("/api/submissions", params={"status": "pending"}).json()["items"]
+                for item in alice.get("/api/plugins/pickone/submissions", params={"status": "pending"}).json()["items"]
                 if item["target"] == MD5S[3] + ".gif"
             )
             check(
@@ -451,10 +454,10 @@ def main() -> int:
                 batch_likes["type"] == "likes" and batch_likes["submitted_value"] == 4,
                 json.dumps(batch_likes, ensure_ascii=False),
             )
-            alice.delete(f"/api/submissions/{batch_likes['id']}")
+            alice.delete(f"/api/plugins/pickone/submissions/{batch_likes['id']}")
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "comments"},
                 json={"name": MD5S[1] + ".gif", "comments": ["新评论", "  再 来 一 条  "]},
             )
@@ -466,7 +469,7 @@ def main() -> int:
             )
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "comments"},
                 json={"name": MD5S[1] + ".gif", "comments": ["x" * 40]},
             )
@@ -484,7 +487,7 @@ def main() -> int:
                 r = admin_client.post(f"/api/admin/review/{item['id']}", json={"approve": True})
                 check(f"Approve submission #{item['id']}", r.status_code == 200, r.text[:200])
 
-            r = admin_client.get("/api/admin/apply/preview")
+            r = admin_client.get("/api/plugins/pickone/admin/apply/preview")
             preview = r.json()
             check("Apply preview readable", r.status_code == 200, r.text[:300])
             check("Preview entry count", preview["submissions"] == 5, str(preview["submissions"]))
@@ -494,11 +497,11 @@ def main() -> int:
                 json.dumps(preview["conflicts"], ensure_ascii=False),
             )
 
-            r = admin_client.post("/api/admin/apply", json={"dry_run": True})
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={"dry_run": True})
             check("Dry run succeeded", r.status_code == 200)
             check("Dry run wrote nothing to disk", "第二次修改" not in parser_path.read_text(encoding="utf-8"))
 
-            r = admin_client.post("/api/admin/apply", json={})
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={})
             result = r.json()
             check("One-click apply succeeded", r.status_code == 200, r.text[:400])
             check("Applied entry count", result["submissions"] == 5, json.dumps(result, ensure_ascii=False))
@@ -546,14 +549,14 @@ def main() -> int:
 
             # 再改一次：增量加在现值上，总量继续涨
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "likes"},
                 json={"name": MD5S[1] + ".gif", "likes_delta": 10, "note": "再加一次"},
             )
             check("A second increment is accepted", r.status_code == 201, r.text[:200])
             second_likes_id = r.json()["submission"]["id"]
             admin_client.post(f"/api/admin/review/{second_likes_id}", json={"approve": True})
-            admin_client.post("/api/admin/apply", json={})
+            admin_client.post("/api/plugins/pickone/admin/apply", json={})
             check(
                 "The increment is added on top of the current total",
                 read_json(parser_path)[MD5S[1] + ".gif"]["likes"] == 57,
@@ -562,7 +565,7 @@ def main() -> int:
 
             # 增量在审核期间被别人改过原值时不该算冲突：加在现值上就行
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "likes"},
                 json={"name": MD5S[1] + ".gif", "likes_delta": 5},
             )
@@ -573,7 +576,7 @@ def main() -> int:
             parser_path.write_text(
                 json.dumps(parser_now, ensure_ascii=False, indent=4), encoding="utf-8"
             )
-            r = admin_client.post("/api/admin/apply", json={})
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={})
             check(
                 "An increment never conflicts with a changed total",
                 not r.json()["conflicts"]
@@ -583,7 +586,7 @@ def main() -> int:
 
             # 单次请求的上限：12 还是会被拦下
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "likes"},
                 json={"name": MD5S[0] + ".gif", "likes_delta": 12},
             )
@@ -591,7 +594,7 @@ def main() -> int:
 
             print("\n== Conflict detection ==")
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": name, "ocr_text": "conflict-text"},
             )
@@ -605,7 +608,7 @@ def main() -> int:
                 json.dumps(parser_now, ensure_ascii=False, indent=4), encoding="utf-8"
             )
 
-            r = admin_client.post("/api/admin/apply", json={})
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={})
             body = r.json()
             check("Conflict detected", len(body["conflicts"]) >= 1, json.dumps(body, ensure_ascii=False))
             check("Conflict writes nothing to disk", read_json(parser_path)[name]["ocr_text"] == "BOT-REWROTE")
@@ -628,7 +631,7 @@ def main() -> int:
                 admin_client.get("/api/admin/queue", params={"status": "approved"}).json()["total"] == 0,
             )
 
-            r = admin_client.get("/api/admin/conflicts")
+            r = admin_client.get("/api/plugins/pickone/admin/conflicts")
             check("Dedicated conflicts endpoint", r.status_code == 200 and r.json()["total"] == 1, r.text[:200])
 
             # A conflicting submission cannot be re-reviewed, only resolved
@@ -637,14 +640,14 @@ def main() -> int:
 
             # Resolution, option A: discard the submission and keep the disk value
             r = admin_client.post(
-                f"/api/admin/conflicts/{conflict_id}/resolve", json={"keep_new": False}
+                f"/api/plugins/pickone/admin/conflicts/{conflict_id}/resolve", json={"keep_new": False}
             )
             check("Resolve by discarding", r.status_code == 200 and r.json()["resolved"] == "discarded", r.text[:200])
             check("Disk keeps the bot value", read_json(parser_path)[name]["ocr_text"] == "BOT-REWROTE")
 
             # Resolution, option B: keep the submitted value and overwrite the disk
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": name, "ocr_text": "user-final"},
             )
@@ -655,8 +658,8 @@ def main() -> int:
             parser_path.write_text(
                 json.dumps(parser_now, ensure_ascii=False, indent=4), encoding="utf-8"
             )
-            admin_client.post("/api/admin/apply", json={})
-            r = admin_client.post(f"/api/admin/conflicts/{keep_id}/resolve", json={"keep_new": True})
+            admin_client.post("/api/plugins/pickone/admin/apply", json={})
+            r = admin_client.post(f"/api/plugins/pickone/admin/conflicts/{keep_id}/resolve", json={"keep_new": True})
             check("Resolve by keeping the new value", r.status_code == 200 and r.json()["applied"] is True, r.text[:200])
             check("Disk overwritten with the submitted value", read_json(parser_path)[name]["ocr_text"] == "user-final")
             check(
@@ -671,7 +674,7 @@ def main() -> int:
 
             print("\n== Conflict via category edit ==")
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "category"},
                 json={"category_id": "LZH-renamed", "keys": ["lzh", "lzh-alias"]},
             )
@@ -684,12 +687,12 @@ def main() -> int:
                 json.dumps(config_now, ensure_ascii=False, indent=2), encoding="utf-8"
             )
 
-            r = admin_client.post("/api/admin/apply", json={})
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={})
             check("Category conflict detected", len(r.json()["conflicts"]) == 1, json.dumps(r.json(), ensure_ascii=False))
             check("config.json untouched", read_json(config_path)["lzh"]["id"] == "CHANGED-BY-BOT")
 
             r = admin_client.post(
-                f"/api/admin/conflicts/{category_conflict_id}/resolve", json={"keep_new": True}
+                f"/api/plugins/pickone/admin/conflicts/{category_conflict_id}/resolve", json={"keep_new": True}
             )
             check("Category conflict resolved", r.status_code == 200, r.text[:200])
             config_after_resolve = read_json(config_path)
@@ -708,14 +711,14 @@ def main() -> int:
             before_text = read_json(parser_path)[same_field_name]["ocr_text"]
 
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": same_field_name, "ocr_text": "alice-version"},
             )
             alice_same_id = r.json()["submission"]["id"]
 
             r = admin_client.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
                 json={"name": same_field_name, "ocr_text": "admin-version"},
             )
@@ -728,7 +731,7 @@ def main() -> int:
 
             # 浏览接口要能看到原值 + 每个人的审核中改动（不止一条）
             listing = alice.get(
-                "/api/images/lzh", params={"page_size": 100, "q": same_field_md5}
+                "/api/plugins/pickone/images/lzh", params={"page_size": 100, "q": same_field_md5}
             ).json()["items"][0]
             check(
                 "Every in-review change is listed with its author",
@@ -743,7 +746,7 @@ def main() -> int:
 
             # 换个视角看：别人的那条 mine=false，自己的那条 mine=true，两条都得在
             admin_view_same = admin_client.get(
-                "/api/images/lzh", params={"page_size": 100, "q": same_field_md5}
+                "/api/plugins/pickone/images/lzh", params={"page_size": 100, "q": same_field_md5}
             ).json()["items"][0]
             check(
                 "The other author's change stays visible and is not marked as mine",
@@ -754,7 +757,7 @@ def main() -> int:
 
             for item in (alice_same_id, admin_same_id):
                 admin_client.post(f"/api/admin/review/{item}", json={"approve": True})
-            r = admin_client.post("/api/admin/apply", json={})
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={})
             check(
                 "The first change lands and the second is held as a conflict",
                 read_json(parser_path)[same_field_name]["ocr_text"] == "alice-version"
@@ -763,7 +766,7 @@ def main() -> int:
             )
 
             r = admin_client.post(
-                f"/api/admin/conflicts/{admin_same_id}/resolve", json={"keep_new": False}
+                f"/api/plugins/pickone/admin/conflicts/{admin_same_id}/resolve", json={"keep_new": False}
             )
             check("Nothing is silently merged", r.status_code == 200, r.text[:200])
             check(
@@ -774,13 +777,13 @@ def main() -> int:
 
             # 类别同理：两个人的改动不能被折叠成一份
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "kepy", "type": "category"},
                 json={"category_id": "kepy-alice", "keys": ["kepy", "kepy-a"]},
             )
             alice_cat_id = r.json()["submission"]["id"]
             r = admin_client.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "kepy", "type": "category"},
                 json={"category_id": "kepy-admin", "keys": ["kepy", "kepy-b"]},
             )
@@ -788,7 +791,7 @@ def main() -> int:
 
             for item in (alice_cat_id, admin_cat_id):
                 admin_client.post(f"/api/admin/review/{item}", json={"approve": True})
-            r = admin_client.post("/api/admin/apply", json={})
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={})
             check(
                 "Two category edits are not folded into one",
                 read_json(config_path)["kepy"]["id"] == "kepy-alice"
@@ -796,20 +799,20 @@ def main() -> int:
                 json.dumps(r.json(), ensure_ascii=False),
             )
             admin_client.post(
-                f"/api/admin/conflicts/{admin_cat_id}/resolve", json={"keep_new": False}
+                f"/api/plugins/pickone/admin/conflicts/{admin_cat_id}/resolve", json={"keep_new": False}
             )
 
             print("\n== Withdraw ==")
             r = alice.post(
-                "/api/submissions",
+                "/api/plugins/pickone/submissions",
                 params={"img_key": "kepy", "type": "likes"},
                 json={"name": MD5S[0] + ".gif", "likes_delta": 3},
             )
             check("Submit for an image missing from parser", r.status_code == 201, r.text[:300])
             withdraw_id = r.json()["submission"]["id"]
-            r = alice.delete(f"/api/submissions/{withdraw_id}")
+            r = alice.delete(f"/api/plugins/pickone/submissions/{withdraw_id}")
             check("Withdraw own submission", r.status_code == 200, r.text[:200])
-            r = alice.delete(f"/api/submissions/{conflict_id}")
+            r = alice.delete(f"/api/plugins/pickone/submissions/{conflict_id}")
             check("Withdrawing a reviewed submission rejected", r.status_code in (400, 403), str(r.status_code))
 
             print("\n== Accounts and admin ==")
@@ -838,7 +841,7 @@ def main() -> int:
             r = admin_client.get("/api/admin/logs")
             check("Audit log", r.status_code == 200 and r.json()["total"] > 0, r.text[:200])
 
-            r = admin_client.get("/api/admin/integrity")
+            r = admin_client.get("/api/plugins/pickone/admin/integrity")
             integrity = r.json()
             lzh_report = next(item for item in integrity["categories"] if item["img_key"] == "lzh")
             check(
@@ -865,7 +868,18 @@ def main() -> int:
             )
 
             r = admin_client.get("/api/meta/info")
-            check("Runtime info", r.status_code == 200 and r.json()["lib_available"], r.text[:200])
+            check("Runtime info", r.status_code == 200, r.text[:200])
+
+            # 数据目录是否可用由插件自己汇报（框架不认识任何工具的数据目录）
+            r = admin_client.get("/api/plugins")
+            pickone_health = {
+                item["slug"]: item.get("health", {}) for item in r.json()["plugins"]
+            }.get("pickone", {})
+            check(
+                "Plugin list reports PickOne health",
+                r.status_code == 200 and pickone_health.get("ok") is True,
+                r.text[:300],
+            )
 
             print("\n== Change password ==")
             bob.post("/api/auth/login", json={"username": "bob", "password": "bob12345678"})

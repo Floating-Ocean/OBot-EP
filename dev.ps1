@@ -74,6 +74,11 @@ if ($backendUp) {
 
 if ($webUp) {
     Write-Host "[x] Port $WebPort is already in use. Close it, or pass -WebPort." -ForegroundColor Red
+    # 上一次 dev.ps1 被强杀（关终端、任务管理器结束进程）时，taskkill 没机会跑，
+    # Vite 会留在后台占着端口。此时下一句话如果只是「端口被占用」，人只会更懵。
+    Write-Host '    A previous dev.ps1 that was killed the hard way leaves Vite behind. Stop it with:' -ForegroundColor DarkGray
+    Write-Host "      Get-NetTCPConnection -LocalPort $WebPort -State Listen |" -ForegroundColor DarkGray
+    Write-Host '        ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }' -ForegroundColor DarkGray
     exit 1
 }
 
@@ -115,7 +120,13 @@ Write-Host ''
 
 try {
     if (-not $backendUp) {
-        # 后端始终只绑回环：开发时浏览器走 Vite 代理，不需要把 API 也暴露出去
+        # 后端始终只绑回环：开发时浏览器走 Vite 代理，不需要把 API 也暴露出去。
+        #
+        # BIND_HOST 必须显式设成回环地址：应用自己看不到 socket 绑定地址，只认这个
+        # 环境变量，拿不到它就一律按「正在对网络提供服务」处理。少了这一行，每一次
+        # dev 启动都会刷一整块「Traffic is PLAIN HTTP / anyone can register」的告警 ——
+        # 而那是假的，这里根本没有对外监听。
+        $env:OBOT_EP_BIND_HOST = '127.0.0.1'
         & $venvPython -m uvicorn server.app:app --host 127.0.0.1 --port $BackendPort --reload
     } else {
         # Backend already running elsewhere: just keep this process (and Vite) alive.

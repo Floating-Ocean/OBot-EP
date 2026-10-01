@@ -1,4 +1,4 @@
-"""用户侧提交路由。"""
+"""用户侧提交路由（挂载于 `/api/plugins/pickone/submissions`）。"""
 
 from __future__ import annotations
 
@@ -7,20 +7,16 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import ValidationError as PydanticValidationError
 
-from ..changes import field_for_type
-from ..repository import (
+from server.api.deps import CurrentUser, Repo
+from server.repository import (
     OPEN_STATUSES,
-    STATUS_APPROVED,
     STATUS_CONFLICT,
     STATUS_PENDING,
-    TYPE_CATEGORY,
-    TYPE_CATEGORY_CREATE,
-    TYPE_COMMENTS,
-    TYPE_LIKES,
-    TYPE_OCR_TEXT,
     Repository,
     Submission,
 )
+
+from ..changes import SLUG, field_for_type
 from ..schemas import (
     CategoryCreateRequest,
     CategorySubmitRequest,
@@ -30,9 +26,16 @@ from ..schemas import (
     OcrSubmitRequest,
 )
 from ..store import NotFoundError, PickOneStore, StoreError, ValidationError
-from .deps import CurrentUser, Repo, Store
+from ..types import (
+    TYPE_CATEGORY,
+    TYPE_CATEGORY_CREATE,
+    TYPE_COMMENTS,
+    TYPE_LIKES,
+    TYPE_OCR_TEXT,
+)
+from .deps import Store
 
-router = APIRouter(prefix="/submissions", tags=["submissions"])
+router = APIRouter(prefix="/submissions", tags=["pickone-submissions"])
 
 # 「待处理」的提交：还没写入 OBot-ACM 的全部状态
 OPEN_FLOW_STATUSES = (*OPEN_STATUSES, STATUS_CONFLICT)
@@ -92,7 +95,7 @@ def _submit_image_field(
     # 已经是「待下发 / 撞了冲突」的话，允许用户改主意并覆盖，不做去重。
     pending = [
         item
-        for item in repo.open_submissions_for_target(type, img_key, name, author_id=user.id)
+        for item in repo.open_submissions_for_target(SLUG, type, img_key, name, author_id=user.id)
         if item.status == STATUS_PENDING
     ]
 
@@ -105,6 +108,7 @@ def _submit_image_field(
         raise ValidationError("提交内容与当前值相同，无需修改")
 
     submission, created = repo.upsert_submission(
+        plugin=SLUG,
         type=type,
         img_key=img_key,
         target=name,
@@ -154,6 +158,7 @@ def _submit_category(
     type_ = TYPE_CATEGORY_CREATE if is_new else TYPE_CATEGORY
     try:
         submission, created = repo.upsert_submission(
+            plugin=SLUG,
             type=type_,
             img_key=img_key,
             target="",
@@ -204,6 +209,7 @@ def list_submissions(
     if status_filter == "open":
         # 「待处理」= 待审 + 已通过 + 冲突挂起，一次性查出来再分页
         rows, total = repo.list_submissions(
+            plugin=SLUG,
             author_id=author_id,
             img_key=img_key or None,
             statuses=OPEN_FLOW_STATUSES,
@@ -215,6 +221,7 @@ def list_submissions(
         rows = rows[start : start + page_size]
     elif status_filter == "all":
         rows, total = repo.list_submissions(
+            plugin=SLUG,
             author_id=author_id,
             img_key=img_key or None,
             limit=page_size,
@@ -222,6 +229,7 @@ def list_submissions(
         )
     else:
         rows, total = repo.list_submissions(
+            plugin=SLUG,
             status=status_map[status_filter],
             author_id=author_id,
             img_key=img_key or None,
@@ -234,8 +242,8 @@ def list_submissions(
         "page": page,
         "page_size": page_size,
         "items": [item.to_dict() for item in rows],
-        # counts 是全站数字（管理员看队列用），mine 是当前用户自己的
-        "counts": repo.count_by_status(),
+        # counts 是本插件各状态的数字，mine 是当前用户自己的
+        "counts": repo.count_by_status(SLUG),
         "mine": repo.count_by_status_for_author(user.id),
     }
 

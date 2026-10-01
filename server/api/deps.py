@@ -1,4 +1,8 @@
-"""共享依赖：取当前登录用户、管理员校验、错误响应。"""
+"""框架级共享依赖：取当前登录用户、管理员校验、插件注册表。
+
+**插件自己的依赖（例如它持有的 Store）不要加在这里**，那会让核心知道插件的存在。
+插件在自己的 `api/deps.py` 里定义，从 `request.app.state.<它的名字>` 取。
+"""
 
 from __future__ import annotations
 
@@ -7,9 +11,9 @@ from typing import Annotated
 from fastapi import Depends, HTTPException, Request, status
 
 from .. import config
+from ..plugin import PluginRegistry
 from ..repository import ROLE_ADMIN, Repository, User
 from ..security import parse_session_token, token_version_matches
-from ..store import PickOneStore
 
 _UNAUTHORIZED = HTTPException(
     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -21,8 +25,8 @@ def get_repo(request: Request) -> Repository:
     return request.app.state.repo
 
 
-def get_store(request: Request) -> PickOneStore:
-    return request.app.state.store
+def get_registry(request: Request) -> PluginRegistry:
+    return request.app.state.plugins
 
 
 def get_current_user(
@@ -69,4 +73,4 @@ def get_admin_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 AdminUser = Annotated[User, Depends(get_admin_user)]
 Repo = Annotated[Repository, Depends(get_repo)]
-Store = Annotated[PickOneStore, Depends(get_store)]
+Registry = Annotated[PluginRegistry, Depends(get_registry)]

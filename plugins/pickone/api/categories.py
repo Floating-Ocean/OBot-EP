@@ -1,20 +1,23 @@
-"""类别路由。"""
+"""类别路由（挂载于 `/api/plugins/pickone/categories`）。"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
+
+from server.api.deps import CurrentUser, Repo
 
 from ..changes import (
+    SLUG,
     category_pending_changes,
     effective_category,
     load_open_submissions,
     pending_category_drafts,
 )
 from ..palette import accent_of
-from ..repository import TYPE_CATEGORY, TYPE_CATEGORY_CREATE
-from .deps import CurrentUser, Repo, Store
+from ..types import TYPE_CATEGORY, TYPE_CATEGORY_CREATE
+from .deps import Store
 
-router = APIRouter(prefix="/categories", tags=["categories"])
+router = APIRouter(prefix="/categories", tags=["pickone-categories"])
 
 
 @router.get("")
@@ -77,7 +80,7 @@ def summary(store: Store, repo: Repo, _user: CurrentUser) -> dict:
                 if item["img_key"] not in store.load_categories()
             ]
         ),
-        "submission_counts": repo.count_by_status(),
+        "submission_counts": repo.count_by_status(SLUG),
         "category_type_count": len(
             [item for item in open_submissions if item.type in (TYPE_CATEGORY, TYPE_CATEGORY_CREATE)]
         ),

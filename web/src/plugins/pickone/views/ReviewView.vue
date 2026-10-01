@@ -3,8 +3,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { Refresh, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
-import SubmissionTable from '@/components/SubmissionTable.vue'
-import ConflictResolveDialog from '@/components/ConflictResolveDialog.vue'
+import SubmissionTable from '@/plugins/pickone/components/SubmissionTable.vue'
+import ConflictResolveDialog from '@/plugins/pickone/components/ConflictResolveDialog.vue'
 import { fieldLabel, renderLikeDelta, renderValue } from '@/utils/format'
 
 const emit = defineEmits(['refresh-summary'])
@@ -78,7 +78,8 @@ function tabLabel(tab) {
 async function load() {
   loading.value = true
   try {
-    const data = await api.reviewQueue({
+    // api.pickone.reviewQueue 已注入 plugin=pickone，队列里不会混进别的工具的提交单
+    const data = await api.pickone.reviewQueue({
       status: activeTab.value,
       img_key: query.img_key.trim() || undefined,
       page: query.page,
@@ -97,7 +98,7 @@ async function load() {
 
 async function loadOverview() {
   try {
-    overview.value = await api.adminOverview()
+    overview.value = await api.pickone.overview()
     counts.value = overview.value.submission_counts ?? {}
   } catch {
     /* 概览失败不影响队列本身 */

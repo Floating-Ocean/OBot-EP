@@ -4,9 +4,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, EditPen } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { api } from '@/api'
-import ImageCard from '@/components/ImageCard.vue'
-import ImageEditorDrawer from '@/components/ImageEditorDrawer.vue'
-import CategoryInfoDialog from '@/components/CategoryInfoDialog.vue'
+import ImageCard from '@/plugins/pickone/components/ImageCard.vue'
+import ImageEditorDrawer from '@/plugins/pickone/components/ImageEditorDrawer.vue'
+import CategoryInfoDialog from '@/plugins/pickone/components/CategoryInfoDialog.vue'
 
 const emit = defineEmits(['refresh-summary'])
 const route = useRoute()

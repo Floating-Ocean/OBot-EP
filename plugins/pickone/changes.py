@@ -21,20 +21,22 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from server.repository import OPEN_STATUSES, Repository, Submission
+
+from . import config
 from .hashing import new_legacy_entry
-from .repository import (
-    OPEN_STATUSES,
+from .store import Category, ImageStat, PickOneStore
+from .types import (
+    CATEGORY_TYPES,
     TYPE_CATEGORY,
     TYPE_CATEGORY_CREATE,
     TYPE_COMMENTS,
     TYPE_LIKES,
     TYPE_OCR_TEXT,
-    Repository,
-    Submission,
 )
-from .store import Category, ImageStat, PickOneStore
 
-CATEGORY_TYPES = (TYPE_CATEGORY, TYPE_CATEGORY_CREATE)
+# 插件自身的 slug：所有提交单都要打上它，审核队列与一键应用才知道归属。
+SLUG = config.SLUG
 
 
 class ApplyConflictError(Exception):
@@ -124,10 +126,10 @@ def image_pending_changes(
 
 
 def load_open_submissions(repo: Repository) -> list[Submission]:
-    """取出所有 pending + approved 的提交单（浏览页展示在途改动用）。"""
+    """取出本插件所有 pending + approved 的提交单（浏览页展示在途改动用）。"""
     collected: list[Submission] = []
     for status in OPEN_STATUSES:
-        rows, _ = repo.list_submissions(status=status, limit=200)
+        rows, _ = repo.list_submissions(plugin=SLUG, status=status, limit=200)
         collected.extend(rows)
     return collected
 
@@ -208,7 +210,7 @@ def effective_category(
 def pending_category_drafts(repo: Repository) -> list[dict[str, Any]]:
     """列出只在提交单里存在、尚待处理的新类别。"""
     drafts: list[dict[str, Any]] = []
-    rows, _ = repo.list_submissions(types=CATEGORY_TYPES, limit=200)
+    rows, _ = repo.list_submissions(plugin=SLUG, types=CATEGORY_TYPES, limit=200)
     for submission in rows:
         if submission.type != TYPE_CATEGORY_CREATE:
             continue
@@ -496,7 +498,7 @@ def _write_plan(store: PickOneStore, plan: ApplyPlan) -> dict[str, int]:
 
 def apply_approved(repo: Repository, store: PickOneStore) -> dict[str, Any]:
     """一键应用：把 approved 提交单写回，冲突单转 conflict 状态挂起。"""
-    submissions = repo.list_approved_submissions()
+    submissions = repo.list_approved_submissions(SLUG)
     if not submissions:
         return {
             "applied_images": 0,

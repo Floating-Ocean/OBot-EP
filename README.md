@@ -5,6 +5,17 @@ Data maintainance platform online for OBot's ACM.
 [OBot-ACM](https://github.com/Floating-Ocean/OBot-ACM) 的 **Web 端维护工具集合**，用于公开维护各模块的数据。
 
 
+## 架构
+
+项目是**插件的集合**，前后端各自**自动发现**插件。
+
+```
+server/                      框架：认证、账号、提交单、审计日志、审核流程、插件注册表、前端托管
+plugins/<slug>/              一个工具的全部后端实现（数据模型 + 接口）
+web/src/plugins/<slug>/      同一个工具的前端实现（manifest + 路由 + 页面）
+```
+
+
 ## 环境要求
 
 NodeJS >= 24.0
@@ -15,6 +26,8 @@ NodeJS >= 24.0
 
 
 ### PickOne（`/pickone`）· 表情包数据
+
+代码：[`plugins/pickone/`](plugins/pickone/) + [`web/src/plugins/pickone/`](web/src/plugins/pickone/)
 
 | 能改什么       | 落到哪里                                      |
 |------------|-------------------------------------------|
@@ -31,6 +44,7 @@ NodeJS >= 24.0
 - 后端：FastAPI + Uvicorn，SQLite（标准库 `sqlite3`）存账号与提交单，Pillow 生成缩略图
 - 前端：Vue 3 + Element Plus + Vue Router + Vite
 - 全站需要登录才能浏览；密码用 PBKDF2-HMAC-SHA256 存摘要，会话是无状态 HMAC 签名 Cookie
+- 插件隔离：提交单带 `plugin` 列，接口挂 `/api/plugins/<slug>/`，工具之间互不干扰
 
 
 ## 快速开始
@@ -87,16 +101,52 @@ npm run build
 ```
 
 
+## 开发：加一个新工具
+
+一条命令生成一个能跑的骨架（后端 + 前端 + 首页卡片 + 审核台），然后只改领域逻辑：
+
+```bash
+uv run python -m server.scaffold mytool --name "My Tool" --tag "数据维护"
+```
+
+生成完它会**自动跑一遍插件契约检查**，并列出还剩哪些 `TODO(mytool)`。
+不需要改框架里的任何文件 —— 插件是自动发现的。
+
+自省命令（想知道「现在有什么、接口挂在哪」时用）：
+
+```bash
+uv run python -m server.inspect plugins                  # 插件清单 + 接线检查
+uv run python -m server.inspect routes [--plugin <slug>] # 完整路由表
+uv run python -m server.inspect check                    # 插件契约校验
+```
+
+完整约定见 [AGENTS.md](AGENTS.md)（总览）与 [plugins/AGENTS.md](plugins/AGENTS.md)（写插件）。
+
+
+## 验证
+
+改完任何东西都跑这一条：
+
+```bash
+.\check.ps1          # ruff + PowerShell lint + 插件契约 + 脚手架自检 + 后端测试 + 安全测试 + 前端构建
+.\check.ps1 -Fast    # 跳过前端构建
+.\check.ps1 -Verbose # 每一步都打印完整输出
+```
+
+
 ## 配置项
 
 可通过环境变量覆盖默认配置。
 
+框架级（`server/config.py`）：
+
 | 变量                       | 默认值                      | 说明                                       |
 |--------------------------|--------------------------|------------------------------------------|
-| `OBOT_ACM_LIB_DIR`       | `../OBot-ACM/lib`        | OBot-ACM 的 `lib` 目录                      |
-| `OBOT_PICK_ONE_DIR`      | `<lib>/Pick-One`         | Pick-One 数据目录                            |
+| `OBOT_ACM_LIB_DIR`       | `../OBot-ACM/lib`        | OBot-ACM 的 `lib` 目录（插件的数据目录挂在它下面）        |
+| `OBOT_ACM_ROOT_DIR`      | `../OBot-ACM`            | OBot-ACM 源码根目录，用来读它的版本号                  |
 | `OBOT_EP_DATA_DIR`       | `./data`                 | 本地数据库与缩略图缓存                              |
 | `OBOT_EP_DB_PATH`        | `<data>/obot_ep.sqlite3` | SQLite 文件                                |
+| `OBOT_EP_LEGACY_PLUGIN`  | `pickone`                | 升级老库时，插件化之前的提交单归属给哪个插件                   |
 | `OBOT_EP_SECRET`         | 随机                       | 会话签名密钥。**生产环境必须固定**，否则重启后所有人掉线           |
 | `OBOT_EP_SESSION_TTL`    | `2592000`                | 会话有效期（秒），默认 30 天                         |
 | `OBOT_EP_COOKIE_SECURE`  | `0`                      | 设 `1` 时会话 Cookie 只走 HTTPS（挂在域名/反代后面务必打开） |
@@ -106,6 +156,12 @@ npm run build
 | `OBOT_EP_FRONTEND_DIST`  | `./web/dist`             | 前端构建产物目录                                 |
 | `OBOT_EP_API`            | `http://127.0.0.1:8000`  | Vite dev server 代理的后端地址                  |
 | `OBOT_EP_WEB_PORT`       | `5173`                   | Vite dev server 端口                       |
+
+插件级（`plugins/<slug>/config.py`，加新工具时在这里加自己的）：
+
+| 变量                  | 默认值              | 说明                    |
+|---------------------|------------------|-----------------------|
+| `OBOT_PICK_ONE_DIR` | `<lib>/Pick-One` | Pick-One 数据目录（PickOne 插件） |
 
 限速与缩略图相关的可调项（一般不用改）：
 

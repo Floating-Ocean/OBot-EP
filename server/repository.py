@@ -5,8 +5,11 @@
     pending   --审核通过-->  approved  --一键应用-->  applied
        \\--审核驳回--> rejected
 
-也就是说审核只是把改动排出队列，真正落到 OBot-ACM 的 JSON 要管理员再点一次
+也就是说审核只是把改动排出队列，真正落到上游数据文件的 JSON 要管理员再点一次
 「一键应用」。这样批量改动可以攒在一起，也便于应用前再看一眼 diff。
+
+**这里是框架层，不认识任何具体工具。** 每张提交单带一个 `plugin` 列标明它属于
+哪个插件，提交类型的中文名由插件通过 `register_submission_types()` 注册进来。
 """
 
 from __future__ import annotations
@@ -17,9 +20,10 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from . import config
 from .security import hash_password, verify_password
@@ -40,6 +44,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS submissions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- 归属插件：一个工具一条线，互不干扰
+    plugin          TEXT    NOT NULL DEFAULT 'pickone',
     type            TEXT    NOT NULL,
     img_key         TEXT    NOT NULL,
     target          TEXT    NOT NULL DEFAULT '',
@@ -59,12 +65,14 @@ CREATE TABLE IF NOT EXISTS submissions (
     conflict_at     REAL
 );
 
--- 同一用户对同一目标只允许一条「在途」提交（待审 / 已通过 / 冲突待裁定），
+-- 同一插件下、同一用户对同一目标只允许一条「在途」提交（待审 / 已通过 / 冲突待裁定），
 -- 用户反复改同一个字段会覆盖这条记录，而不是把队列刷爆。
 -- 注意 author_id 必须在索引里：否则 A 提交后 B 就被挡住，没法同时给同一张图提修改。
-CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_pending
-    ON submissions(type, img_key, target, author_id)
-    WHERE status IN ('pending', 'approved', 'conflict');
+-- plugin 也必须在索引里：两个工具各自的 "ocr_text" 是两个互不相干的东西。
+--
+-- 这两个索引依赖 plugin 列，而老库要先 ALTER TABLE 才有这一列，所以它们不放在
+-- 这里建（会让 executescript 在迁移之前就报 "no such column: plugin"），
+-- 统一由 _migrate_submissions_plugin() 负责。
 
 CREATE INDEX IF NOT EXISTS idx_submissions_status ON submissions(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_submissions_author ON submissions(author_id, created_at DESC);
@@ -96,30 +104,25 @@ OPEN_STATUSES = (STATUS_PENDING, STATUS_APPROVED)
 CLOSED_STATUSES = (STATUS_REJECTED, STATUS_APPLIED)
 ALL_STATUSES = (STATUS_PENDING, STATUS_APPROVED, STATUS_CONFLICT, STATUS_REJECTED, STATUS_APPLIED)
 
-TYPE_OCR_TEXT = "ocr_text"
-TYPE_LIKES = "likes"
-TYPE_COMMENTS = "comments"
-TYPE_CATEGORY = "category"
-TYPE_CATEGORY_CREATE = "category_create"
+# ---- 提交类型注册表（由插件在启动时填充）----
+# 框架只存 `type` 字符串，具体有哪些类型、中文名是什么，是插件自己的事。
+# 插件在 `BasePlugin.startup()` 之前（通常在模块导入时）调用 register_submission_types()。
+_TYPE_LABELS: dict[str, dict[str, str]] = {}
 
-SUBMISSION_TYPES = (
-    TYPE_OCR_TEXT,
-    TYPE_LIKES,
-    TYPE_COMMENTS,
-    TYPE_CATEGORY,
-    TYPE_CATEGORY_CREATE,
-)
 
-# 落在 parser.json 里的提交类型（相对的是写 config.json 的类别类提交）
-IMAGE_TYPES = (TYPE_OCR_TEXT, TYPE_LIKES, TYPE_COMMENTS)
+def register_submission_types(plugin: str, labels: dict[str, str]) -> None:
+    """声明某个插件的提交类型及其中文名。重复注册同名插件会直接报错。"""
+    if plugin in _TYPE_LABELS:
+        raise ValueError(f"提交类型重复注册: {plugin}")
+    _TYPE_LABELS[plugin] = dict(labels)
 
-TYPE_LABELS = {
-    TYPE_OCR_TEXT: "图片描述",
-    TYPE_LIKES: "点赞",
-    TYPE_COMMENTS: "评论",
-    TYPE_CATEGORY: "类别信息",
-    TYPE_CATEGORY_CREATE: "新增类别",
-}
+
+def known_submission_types(plugin: str) -> tuple[str, ...]:
+    return tuple(_TYPE_LABELS.get(plugin, ()))
+
+
+def type_label_for(plugin: str, type_: str) -> str:
+    return _TYPE_LABELS.get(plugin, {}).get(type_, type_)
 
 ROLE_USER = "user"
 ROLE_ADMIN = "admin"
@@ -160,6 +163,7 @@ class User:
 @dataclass
 class Submission:
     id: int
+    plugin: str
     type: str
     img_key: str
     target: str
@@ -181,11 +185,12 @@ class Submission:
 
     @property
     def type_label(self) -> str:
-        return TYPE_LABELS.get(self.type, self.type)
+        return type_label_for(self.plugin, self.type)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
+            "plugin": self.plugin,
             "type": self.type,
             "type_label": self.type_label,
             "img_key": self.img_key,
@@ -226,6 +231,7 @@ class Repository:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
             self._migrate_audit_actor_fk()
+            self._migrate_submissions_plugin()
             self._conn.commit()
 
     def close(self) -> None:
@@ -281,6 +287,48 @@ class Repository:
         finally:
             self._conn.commit()
             self._conn.execute("PRAGMA foreign_keys=ON")
+
+    def _migrate_submissions_plugin(self) -> None:
+        """把老库的 submissions 升级成「按插件分线」。
+
+        两步都是幂等的：
+
+        1. 补 `plugin` 列。老库里的提交单都是插件化之前产生的，全部认领给
+           `config.LEGACY_PLUGIN_SLUG`（默认 pickone）。
+        2. 重建唯一索引，让它带上 plugin。CREATE INDEX IF NOT EXISTS 不会改
+           已存在的索引，所以只能先看定义、再 DROP/CREATE。
+        """
+        columns = {str(row["name"]) for row in self._query("PRAGMA table_info(submissions)")}
+        if "plugin" not in columns:
+            logger.info("migrating submissions: adding plugin column")
+            # SQLite 的 ALTER TABLE ... DEFAULT 不接受占位符，只能内联；
+            # config 在导入时已经校验过这个值只含 [a-z0-9_-]。
+            self._conn.execute(
+                "ALTER TABLE submissions ADD COLUMN plugin TEXT NOT NULL"
+                f" DEFAULT '{config.LEGACY_PLUGIN_SLUG}'"
+            )
+            self._conn.execute(
+                "UPDATE submissions SET plugin = ? WHERE plugin IS NULL OR plugin = ''",
+                (config.LEGACY_PLUGIN_SLUG,),
+            )
+
+        row = self._query_one(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_submissions_pending'"
+        )
+        if row is not None and "plugin" not in str(row["sql"] or ""):
+            logger.info("migrating submissions: rebuilding idx_submissions_pending")
+            self._conn.execute("DROP INDEX idx_submissions_pending")
+
+        # 索引定义以 SCHEMA 为准，这里只负责把该存在的那份建出来
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_submissions_pending"
+            " ON submissions(plugin, type, img_key, target, author_id)"
+            " WHERE status IN ('pending', 'approved', 'conflict')"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_submissions_plugin"
+            " ON submissions(plugin, status, created_at DESC)"
+        )
 
     # ---------- 内部小工具 ----------
 
@@ -447,6 +495,7 @@ class Repository:
     def _row_to_submission(row: sqlite3.Row) -> Submission:
         return Submission(
             id=int(row["id"]),
+            plugin=str(row["plugin"] or config.LEGACY_PLUGIN_SLUG),
             type=str(row["type"]),
             img_key=str(row["img_key"]),
             target=str(row["target"] or ""),
@@ -480,6 +529,7 @@ class Repository:
     def upsert_submission(
         self,
         *,
+        plugin: str,
         type: str,
         img_key: str,
         target: str,
@@ -490,11 +540,11 @@ class Repository:
     ) -> tuple[Submission, bool]:
         """新建或覆盖同一目标的待处理提交单，返回 (提交单, 是否新建)。
 
-        同一 (type, img_key, target) 只会有一条 pending/approved 记录，
-        因此用户反复修改同一字段不会把审核队列刷爆；每次操作仍会写审计日志。
+        同一 (plugin, type, img_key, target, author_id) 只会有一条 pending/approved
+        记录，因此用户反复修改同一字段不会把审核队列刷爆；每次操作仍会写审计日志。
         """
-        if type not in SUBMISSION_TYPES:
-            raise ValueError(f"未知提交类型: {type}")
+        if type not in _TYPE_LABELS.get(plugin, ()):
+            raise ValueError(f"未知提交类型: {plugin}/{type}")
 
         payload = _dumps(submitted_value)
         now = time.time()
@@ -502,9 +552,9 @@ class Repository:
         with self._lock:
             # conflict 也算「在途」：用户重新提交同一目标时应该覆盖掉冲突单
             existing = self._conn.execute(
-                "SELECT * FROM submissions WHERE type = ? AND img_key = ? AND target = ?"
-                " AND author_id = ? AND status IN (?, ?, ?)",
-                (type, img_key, target, author_id, *OPEN_STATUSES, STATUS_CONFLICT),
+                "SELECT * FROM submissions WHERE plugin = ? AND type = ? AND img_key = ?"
+                " AND target = ? AND author_id = ? AND status IN (?, ?, ?)",
+                (plugin, type, img_key, target, author_id, *OPEN_STATUSES, STATUS_CONFLICT),
             ).fetchone()
 
             if existing is not None:
@@ -522,10 +572,10 @@ class Repository:
                 return row, False
 
             cursor = self._conn.execute(
-                "INSERT INTO submissions (type, img_key, target, base_value, submitted_value,"
-                " note, status, author_id, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (type, img_key, target, _dumps(base_value), payload, note,
+                "INSERT INTO submissions (plugin, type, img_key, target, base_value,"
+                " submitted_value, note, status, author_id, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (plugin, type, img_key, target, _dumps(base_value), payload, note,
                  STATUS_PENDING, author_id, now),
             )
             self._conn.commit()
@@ -544,6 +594,7 @@ class Repository:
     def list_submissions(
         self,
         *,
+        plugin: str | None = None,
         status: str | None = None,
         statuses: Iterable[str] | None = None,
         author_id: int | None = None,
@@ -555,6 +606,9 @@ class Repository:
     ) -> tuple[list[Submission], int]:
         where: list[str] = []
         params: list[Any] = []
+        if plugin:
+            where.append("s.plugin = ?")
+            params.append(plugin)
         if status:
             where.append("s.status = ?")
             params.append(status)
@@ -573,7 +627,7 @@ class Repository:
             where.append("s.type = ?")
             params.append(type)
         elif types:
-            values = [item for item in types]
+            values = list(types)
             if values:
                 where.append(f"s.type IN ({', '.join('?' for _ in values)})")
                 params.extend(values)
@@ -591,9 +645,15 @@ class Repository:
         )
         return [self._row_to_submission(row) for row in rows], total
 
-    def count_by_status(self) -> dict[str, int]:
-        rows = self._query("SELECT status, COUNT(*) AS n FROM submissions GROUP BY status")
-        counts = {status: 0 for status in ALL_STATUSES}
+    def count_by_status(self, plugin: str | None = None) -> dict[str, int]:
+        if plugin:
+            rows = self._query(
+                "SELECT status, COUNT(*) AS n FROM submissions WHERE plugin = ? GROUP BY status",
+                (plugin,),
+            )
+        else:
+            rows = self._query("SELECT status, COUNT(*) AS n FROM submissions GROUP BY status")
+        counts = dict.fromkeys(ALL_STATUSES, 0)
         for row in rows:
             counts[str(row["status"])] = int(row["n"])
         return counts
@@ -608,7 +668,7 @@ class Repository:
             "SELECT status, COUNT(*) AS n FROM submissions WHERE author_id = ? GROUP BY status",
             (author_id,),
         )
-        counts = {status: 0 for status in ALL_STATUSES}
+        counts = dict.fromkeys(ALL_STATUSES, 0)
         for row in rows:
             counts[str(row["status"])] = int(row["n"])
         return counts
@@ -621,25 +681,30 @@ class Repository:
         )
         return [self._row_to_submission(row) for row in rows]
 
-    def list_approved_submissions(self) -> list[Submission]:
-        """待应用的提交单，按 id 升序保证可预期地覆盖。"""
+    def list_approved_submissions(self, plugin: str) -> list[Submission]:
+        """某个插件待应用的提交单，按 id 升序保证可预期地覆盖。"""
         rows = self._query(
             self._SUBMISSION_SELECT
-            + " WHERE s.status = ? ORDER BY s.id ASC",
-            (STATUS_APPROVED,),
+            + " WHERE s.status = ? AND s.plugin = ? ORDER BY s.id ASC",
+            (STATUS_APPROVED, plugin),
         )
         return [self._row_to_submission(row) for row in rows]
 
     def open_submissions_for_target(
-        self, type: str, img_key: str, target: str, author_id: int | None = None
+        self,
+        plugin: str,
+        type: str,
+        img_key: str,
+        target: str,
+        author_id: int | None = None,
     ) -> list[Submission]:
         """某个目标上还没落盘的提交。给了 author_id 就只看这个人的。"""
         sql = (
             self._SUBMISSION_SELECT
-            + " WHERE s.type = ? AND s.img_key = ? AND s.target = ?"
+            + " WHERE s.plugin = ? AND s.type = ? AND s.img_key = ? AND s.target = ?"
             " AND s.status IN (?, ?)"
         )
-        params: list[Any] = [type, img_key, target, *OPEN_STATUSES]
+        params: list[Any] = [plugin, type, img_key, target, *OPEN_STATUSES]
         if author_id is not None:
             sql += " AND s.author_id = ?"
             params.append(author_id)
@@ -764,11 +829,11 @@ class Repository:
             raise ConflictError("只有待审核的提交可以撤回")
         self._execute("DELETE FROM submissions WHERE id = ?", (submission_id,))
 
-    def has_open_submission(self, type: str, img_key: str, target: str) -> bool:
+    def has_open_submission(self, plugin: str, type: str, img_key: str, target: str) -> bool:
         row = self._query_one(
-            "SELECT 1 AS x FROM submissions WHERE type = ? AND img_key = ? AND target = ?"
-            " AND status IN (?, ?) LIMIT 1",
-            (type, img_key, target, *OPEN_STATUSES),
+            "SELECT 1 AS x FROM submissions WHERE plugin = ? AND type = ? AND img_key = ?"
+            " AND target = ? AND status IN (?, ?) LIMIT 1",
+            (plugin, type, img_key, target, *OPEN_STATUSES),
         )
         return row is not None
 

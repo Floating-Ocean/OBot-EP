@@ -8,6 +8,7 @@ Run: .venv\\Scripts\\python.exe tests\\security_test.py
 
 from __future__ import annotations
 
+import contextlib
 import io
 import os
 import shutil
@@ -27,6 +28,8 @@ os.environ["OBOT_PICK_ONE_DIR"] = str(FIXTURE)
 os.environ["OBOT_EP_DATA_DIR"] = str(DATA_DIR)
 os.environ["OBOT_EP_ADMIN_PASSWORD"] = "admin12345"
 os.environ["OBOT_EP_SECRET"] = "security-test-secret"
+# 同 smoke_test：不设的话每个 TestClient(app) 都会刷一遍「对网络提供服务」的告警
+os.environ["OBOT_EP_BIND_HOST"] = "127.0.0.1"
 # 登录预算放宽：本文件里有好几处正常登录，真正测限速的部分用独立的
 # RateLimiter 实例做（见 test_rate_limiter_unit），免得测试之间互相踩
 os.environ["OBOT_EP_LOGIN_MAX"] = "24"
@@ -36,18 +39,17 @@ os.environ["OBOT_EP_THUMB_MAX_PIXELS"] = "2000"
 
 # 中文提示在 GBK 控制台上会乱码，也方便断言里比对中文文案
 for stream in (sys.stdout, sys.stderr):
-    try:
+    with contextlib.suppress(AttributeError, ValueError):  # pragma: no cover
         stream.reconfigure(encoding="utf-8", errors="replace")
-    except (AttributeError, ValueError):  # pragma: no cover
-        pass
 
-from PIL import Image  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
+from PIL import Image  # noqa: E402
 
+from plugins.pickone import config as pickone_config  # noqa: E402
+from plugins.pickone.hashing import ThumbnailError, make_thumbnail  # noqa: E402
 from server import config  # noqa: E402
 from server.api import auth as auth_api  # noqa: E402
 from server.app import app  # noqa: E402
-from server.hashing import ThumbnailError, make_thumbnail  # noqa: E402
 from server.ratelimit import RateLimiter  # noqa: E402
 from server.repository import Repository  # noqa: E402
 from server.security import hash_password, parse_session_token, verify_password  # noqa: E402
@@ -79,7 +81,7 @@ def build_fixture() -> None:
     (FIXTURE / CATEGORY / f"{MD5}.gif").write_bytes(buffer.getvalue())
     (FIXTURE / CATEGORY / "parser.json").write_text("{}", encoding="utf-8")
     (FIXTURE / "config.json").write_text(
-        '{"%s": {"id": "安全", "key": ["安全", "sec"]}}' % CATEGORY, encoding="utf-8"
+        '{"' + CATEGORY + '": {"id": "安全", "key": ["安全", "sec"]}}', encoding="utf-8"
     )
 
 
@@ -155,7 +157,7 @@ def test_csrf_origin() -> None:
         )
         check("Cross-site referer rejected", r.status_code == 403, r.text[:200])
 
-        r = client.get("/api/categories", headers={"origin": "http://evil.example"})
+        r = client.get("/api/plugins/pickone/categories", headers={"origin": "http://evil.example"})
         check("Read-only cross-site GET still allowed", r.status_code == 200, r.text[:200])
 
 
@@ -216,7 +218,7 @@ def test_public_endpoints() -> None:
         body = r.text
         check(
             "Health check has no filesystem path",
-            r.status_code == 200 and str(config.PICK_ONE_DIR) not in body and "lib" not in body,
+            r.status_code == 200 and str(pickone_config.PICK_ONE_DIR) not in body and "lib" not in body,
             body[:200],
         )
 
@@ -241,21 +243,21 @@ def test_input_validation() -> None:
         )
         check("Admin login for validation checks", r.status_code == 200, r.text[:200])
 
-        r = client.get("/api/submissions", params={"status": "all", "img_key": "../" * 10})
+        r = client.get("/api/plugins/pickone/submissions", params={"status": "all", "img_key": "../" * 10})
         check(
             "Traversal-ish img_key filter is not a server error",
             r.status_code == 200,
             str(r.status_code),
         )
 
-        r = client.get(f"/api/images/{'a' * 300}/stats")
+        r = client.get(f"/api/plugins/pickone/images/{'a' * 300}/stats")
         check(
             "Over-long category id is refused without touching the filesystem",
             r.status_code in (404, 414),
             str(r.status_code),
         )
 
-        r = client.get(f"/api/images/{CATEGORY}/hash-id/{'z' * 5000}")
+        r = client.get(f"/api/plugins/pickone/images/{CATEGORY}/hash-id/{'z' * 5000}")
         check(
             "Over-long hash id is refused",
             r.status_code in (400, 414),
@@ -269,7 +271,7 @@ def test_input_validation() -> None:
             str(r.status_code),
         )
 
-        r = client.get(f"/api/images/{CATEGORY}/thumb/../../config.json")
+        r = client.get(f"/api/plugins/pickone/images/{CATEGORY}/thumb/../../config.json")
         check(
             "Thumbnail path traversal is refused",
             r.status_code == 404,
@@ -323,17 +325,16 @@ def test_login_rate_limit_response() -> None:
     mock = unittest.mock
     with mock.patch.object(auth_api, "_login_by_ip", AlwaysBlocked()), mock.patch.object(
         auth_api, "_login_by_user", AlwaysBlocked()
-    ):
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/auth/login", json={"username": "admin", "password": "admin67890"}
-            )
-            check("Rate-limited login returns 429", r.status_code == 429, str(r.status_code))
-            check(
-                "429 carries the Retry-After header",
-                r.headers.get("retry-after") == "42",
-                str(r.headers.get("retry-after")),
-            )
+    ), TestClient(app) as client:
+        r = client.post(
+            "/api/auth/login", json={"username": "admin", "password": "admin67890"}
+        )
+        check("Rate-limited login returns 429", r.status_code == 429, str(r.status_code))
+        check(
+            "429 carries the Retry-After header",
+            r.headers.get("retry-after") == "42",
+            str(r.headers.get("retry-after")),
+        )
 
     with TestClient(app) as client:
         r = client.post(
@@ -447,7 +448,7 @@ def test_category_key_case() -> None:
         check("Admin login for category checks", r.status_code == 200, r.text[:200])
 
         r = client.post(
-            "/api/submissions",
+            "/api/plugins/pickone/submissions",
             params={"img_key": CATEGORY.upper(), "type": "category_create"},
             json={"category_id": "新类别", "keys": ["另起一个别名"]},
         )
@@ -494,7 +495,7 @@ def test_delete_user_with_history() -> None:
         r = login("ghost", "ghost12345")
         check("Ghost logs in", r.status_code == 200, r.text[:200])
         r = client.post(
-            "/api/submissions",
+            "/api/plugins/pickone/submissions",
             params={"img_key": CATEGORY, "type": "likes"},
             json={"name": f"{MD5}.gif", "likes_delta": 1},
         )
@@ -537,13 +538,13 @@ def test_stray_gif_does_not_break_listing() -> None:
             client.post(
                 "/api/auth/login", json={"username": "admin", "password": "admin67890"}
             )
-            r = client.get("/api/categories")
+            r = client.get("/api/plugins/pickone/categories")
             check(
                 "Category list survives a stray .gif",
                 r.status_code == 200,
                 f"{r.status_code} {r.text[:200]}",
             )
-            r = client.get(f"/api/images/{CATEGORY}")
+            r = client.get(f"/api/plugins/pickone/images/{CATEGORY}")
             names = [item["name"] for item in r.json().get("items", [])]
             check(
                 "Stray file is not listed as an image",
@@ -568,7 +569,7 @@ def test_thumbnail_cache_integrity() -> None:
             client.post(
                 "/api/auth/login", json={"username": "admin", "password": "admin67890"}
             )
-            first = client.get(f"/api/images/{CATEGORY}/thumb/{MD5}.gif")
+            first = client.get(f"/api/plugins/pickone/images/{CATEGORY}/thumb/{MD5}.gif")
             check("Thumbnail generated", first.status_code == 200, first.text[:120])
 
             cached = list(config.THUMB_DIR.glob("*.webp"))
@@ -581,7 +582,7 @@ def test_thumbnail_cache_integrity() -> None:
             original = cache_path.read_bytes()
             cache_path.write_bytes(original[: len(original) // 2])
 
-            rebuilt = client.get(f"/api/images/{CATEGORY}/thumb/{MD5}.gif")
+            rebuilt = client.get(f"/api/plugins/pickone/images/{CATEGORY}/thumb/{MD5}.gif")
             check(
                 "Corrupt cache entry is not served",
                 rebuilt.status_code == 200 and rebuilt.content != original[: len(original) // 2],
@@ -589,7 +590,7 @@ def test_thumbnail_cache_integrity() -> None:
             )
 
             cache_path.write_bytes(b"RIFF\x00\x00\x00\x00WEBP")
-            header_only = client.get(f"/api/images/{CATEGORY}/thumb/{MD5}.gif")
+            header_only = client.get(f"/api/plugins/pickone/images/{CATEGORY}/thumb/{MD5}.gif")
             check(
                 "Header-only cache entry is not served",
                 header_only.status_code == 200 and len(header_only.content) > 16,

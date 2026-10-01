@@ -1,50 +1,54 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '@/api'
+import { plugins } from '@/plugins/registry'
 import { session } from '@/stores/session'
 
 const router = useRouter()
-const summary = ref(null)
 const loading = ref(true)
 
-const TOOLS = [
-  {
-    name: 'PickOne 表情包',
-    path: '/pickone',
-    tag: '表情包数据',
-    icon: 'Grid',
-    summary: '维护「来只」表情包的图片描述、类别别名与点赞评论。',
-    accent: {
-      tint: 'rgba(122, 92, 255, 0.10)',
-      tint_strong: 'rgba(122, 92, 255, 0.26)',
-      ink: '#5a3ec8',
-      track: 'rgba(122, 92, 255, 0.2)',
-      glow: 'rgba(122, 92, 255, 0.32)',
-    },
-  },
-]
-
-const tools = computed(() =>
-  TOOLS.map((tool) => {
-    if (tool.path !== '/pickone' || !summary.value) return { ...tool, stat: null }
-    return {
-      ...tool,
-      stat: {
-        todo: summary.value.missing_ocr,
-        total: summary.value.image_count,
-        categories: summary.value.category_count,
-      },
-    }
-  }),
+/**
+ * 工具列表来自插件注册表 —— 加一个工具不需要改这个文件。
+ * stat 是可选的：拿不到统计（没登录、上游数据目录不在、接口报错）就退化成
+ * 「进入工具」，一个工具坏掉不影响别的卡片。
+ */
+const tiles = ref(
+  plugins.map((plugin) => ({ plugin, stat: null, error: '' })),
 )
+
+const DEFAULT_ACCENT = {
+  tint: 'rgba(56, 189, 214, 0.10)',
+  tint_strong: 'rgba(56, 189, 214, 0.26)',
+  ink: '#0f6f85',
+  track: 'rgba(56, 189, 214, 0.2)',
+  glow: 'rgba(56, 189, 214, 0.3)',
+}
+
+function accentStyle(manifest) {
+  const accent = { ...DEFAULT_ACCENT, ...(manifest.accent ?? {}) }
+  return {
+    '--ep-accent-tint': accent.tint,
+    '--ep-accent-strong': accent.tint_strong,
+    '--ep-accent-ink': accent.ink,
+    '--ep-accent-track': accent.track,
+    '--ep-accent-glow': accent.glow,
+  }
+}
 
 async function load() {
   loading.value = true
   try {
-    summary.value = await api.categorySummary()
-  } catch {
-    summary.value = null
+    await Promise.all(
+      tiles.value.map(async (tile) => {
+        if (typeof tile.plugin.stat !== 'function') return
+        try {
+          tile.stat = await tile.plugin.stat()
+        } catch (error) {
+          tile.stat = null
+          tile.error = error.message
+        }
+      }),
+    )
   } finally {
     loading.value = false
   }
@@ -64,50 +68,42 @@ onMounted(load)
       </div>
     </div>
 
-    <!-- 只在连不上数据目录时提示；正常情况不占位置 -->
-    <el-alert
-      v-if="summary && !summary.lib_available"
-      type="error"
-      :closable="false"
-      show-icon
-      class="ep-mb"
-      title="数据目录不可用"
-      :description="`后端读不到 ${summary.lib_dir}，页面只能浏览，提交会失败。`"
-    />
-
     <p class="ep-section-label">可用工具</p>
 
     <div class="ep-grid tool-grid" v-loading="loading">
       <button
-        v-for="tool in tools"
-        :key="tool.path"
+        v-for="tile in tiles"
+        :key="tile.plugin.manifest.slug"
         class="ep-tile tool-tile"
-        :style="{
-          '--ep-accent-tint': tool.accent.tint,
-          '--ep-accent-strong': tool.accent.tint_strong,
-          '--ep-accent-ink': tool.accent.ink,
-          '--ep-accent-track': tool.accent.track,
-          '--ep-accent-glow': tool.accent.glow,
-        }"
-        @click="router.push(tool.path)"
+        :style="accentStyle(tile.plugin.manifest)"
+        @click="router.push(tile.plugin.manifest.home)"
       >
         <span class="tool-head">
-          <span class="tool-icon"><el-icon><component :is="tool.icon" /></el-icon></span>
-          <span class="ep-chip ep-chip--accent">{{ tool.tag }}</span>
+          <span class="tool-icon">
+            <el-icon><component :is="tile.plugin.manifest.icon" /></el-icon>
+          </span>
+          <span class="ep-chip ep-chip--accent">{{ tile.plugin.manifest.tag }}</span>
         </span>
 
-        <span class="ep-tile-name">{{ tool.name }}</span>
-        <span class="ep-tile-aliases">{{ tool.summary }}</span>
+        <span class="ep-tile-name">{{ tile.plugin.manifest.name }}</span>
+        <span class="ep-tile-aliases">{{ tile.plugin.manifest.summary }}</span>
 
         <span class="ep-tile-foot">
-          <span v-if="tool.stat && tool.stat.todo > 0">
-            {{ tool.stat.categories }} 个类别 · {{ tool.stat.total }} 张图 ·
-            <b>{{ tool.stat.todo }}</b> 张缺描述
-          </span>
-          <span v-else-if="tool.stat">
-            {{ tool.stat.categories }} 个类别 · {{ tool.stat.total }} 张图 · 描述已补全
-          </span>
-          <span v-else>进入工具</span>
+          <!--
+            stat() 的返回值只有三种含义，框架不解释它的内容 ——
+            文案由插件自己拼（`label` / `hint`），否则框架就得知道
+            「张图」「缺描述」这些属于某个具体工具的词汇。
+          -->
+          <template v-if="tile.error">
+            <el-icon><WarningFilled /></el-icon> {{ tile.error }}
+          </template>
+          <template v-else-if="tile.stat && tile.stat.ok === false">
+            <el-icon><WarningFilled /></el-icon> {{ tile.stat.hint || '暂不可用' }}
+          </template>
+          <template v-else-if="tile.stat && tile.stat.label">
+            {{ tile.stat.label }}
+          </template>
+          <template v-else>进入工具</template>
           <el-icon><Right /></el-icon>
         </span>
 

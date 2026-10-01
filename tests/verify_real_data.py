@@ -21,8 +21,8 @@ BOT_TOOLS = ACM / "src" / "core" / "util" / "tools.py"
 
 os.environ.setdefault("OBOT_PICK_ONE_DIR", str(LIB))
 
-from server import hashing  # noqa: E402
-from server.store import PickOneStore  # noqa: E402
+from plugins.pickone import hashing
+from plugins.pickone.store import PickOneStore  # noqa: E402
 
 PASSED: list[str] = []
 FAILED: list[str] = []
@@ -135,7 +135,6 @@ def main() -> int:
 
     print("\n== Write-back compatibility (verified on a temporary copy, real data untouched) ==")
     import shutil
-    import tempfile
 
     tmp_dir = ROOT / ".tmp" / "roundtrip"
     shutil.rmtree(tmp_dir, ignore_errors=True)

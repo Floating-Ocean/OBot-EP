@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import { session } from '@/stores/session'
-import SubmissionTable from '@/components/SubmissionTable.vue'
+import SubmissionTable from '@/plugins/pickone/components/SubmissionTable.vue'
 
 const emit = defineEmits(['refresh-summary'])
 
