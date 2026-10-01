@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
@@ -80,21 +80,84 @@ const CORE_ADMIN_NAV = [
 
 const activePlugin = computed(() => currentPlugin(route.path))
 
-const toolName = computed(() => activePlugin.value?.manifest.name ?? "OBot's Endpoint")
+/**
+ * 记住上次待过的工具。框架自己的管理页（账号 / 日志）不属于任何工具，
+ * 但在这类页面上把工具导航留着，用户点进去以后还能一步点回来。
+ * 存在 sessionStorage 里是为了刷新后仍然记得。
+ */
+const LAST_TOOL_KEY = 'obot-ep.last-tool'
 
-const toolPrefix = computed(() => activePlugin.value?.manifest.home ?? '')
-
-const navItems = computed(() => {
-  const items = [...(activePlugin.value?.manifest.nav ?? CORE_NAV)]
-  if (session.isAdmin.value) {
-    items.push(...CORE_ADMIN_NAV, ...(activePlugin.value?.manifest.adminNav ?? []))
+function readLastTool() {
+  try {
+    return sessionStorage.getItem(LAST_TOOL_KEY) ?? ''
+  } catch {
+    return '' // 读不到就退化成「没有记忆」，只影响这一个便利功能
   }
+}
+
+const lastToolSlug = ref(readLastTool())
+
+watch(
+  () => activePlugin.value?.manifest.slug ?? '',
+  (slug) => {
+    if (!slug) return
+    lastToolSlug.value = slug
+    try {
+      sessionStorage.setItem(LAST_TOOL_KEY, slug)
+    } catch {
+      /* 存不下就只在本次会话里记着 */
+    }
+  },
+  { immediate: true },
+)
+
+/** 框架管理页：有 meta.admin、但不属于任何插件 */
+const inFrameworkAdmin = computed(() => Boolean(route.meta.admin) && !route.meta.plugin)
+
+/**
+ * 导航栏要显示哪个工具的入口：优先当前工具；框架管理页上退回上次待过的工具。
+ * 其余情况（工具首页、404）没有「当前工具」，只显示框架导航。
+ */
+const contextPlugin = computed(
+  () => activePlugin.value ?? (inFrameworkAdmin.value ? pluginBySlug(lastToolSlug.value) : null),
+)
+
+const toolName = computed(() => contextPlugin.value?.manifest.name ?? "OBot's Endpoint")
+
+const toolPrefix = computed(() => contextPlugin.value?.manifest.home ?? '')
+
+/**
+ * 工具组：这个工具自己的页面（nav + 管理员额外看到的 adminNav）。
+ * 框架入口不混进来（它们收在右上角账号菜单里）—— 否则「审核台」会被账号 / 日志
+ * 隔开，看着不像同一个工具的东西，整行的含义也变成两种。
+ */
+const toolNavItems = computed(() => {
+  const plugin = contextPlugin.value
+  if (!plugin) return CORE_NAV
+  const items = [...(plugin.manifest.nav ?? [])]
+  if (session.isAdmin.value) items.push(...(plugin.manifest.adminNav ?? []))
+  return items
+})
+
+/**
+ * 账号菜单的条目。账号管理 / 操作日志是**框架**的全局页面，不属于任何工具，
+ * 所以不进工具导航行 —— 整行只有一种含义：「当前工具里的页面」。
+ * 全局动作收在右上角账号菜单里，那里本来就是「跟当前工具无关」的地方。
+ */
+const accountMenu = computed(() => {
+  const items = [{ command: 'password', label: '修改密码', icon: 'Key' }]
+  if (session.isAdmin.value) {
+    for (const item of CORE_ADMIN_NAV) {
+      items.push({ ...item, command: `go:${item.path}`, divided: true })
+    }
+  }
+  items.push({ command: 'logout', label: '退出登录', icon: 'SwitchButton', divided: true })
   return items
 })
 
 /** 最长前缀匹配，避免 /pickone 把 /pickone/submissions 也点亮 */
 const activePath = computed(() => {
-  const matches = navItems.value
+  const matches = [...toolNavItems.value, ...CORE_ADMIN_NAV]
     .filter((item) => route.path === item.path || route.path.startsWith(`${item.path}/`))
     .sort((a, b) => b.path.length - a.path.length)
   return matches[0]?.path ?? route.path
@@ -106,6 +169,12 @@ const passwordOpen = ref(false)
 const passwordForm = reactive({ old_password: '', new_password: '', confirm: '', busy: false })
 
 async function handleAccountCommand(command) {
+  // 框架管理页从菜单里进：它们不属于任何工具，所以不占工具导航行
+  if (command.startsWith('go:')) {
+    router.push(command.slice(3))
+    return
+  }
+
   if (command === 'password') {
     passwordForm.old_password = ''
     passwordForm.new_password = ''
@@ -171,10 +240,10 @@ async function submitPassword() {
         </span>
       </div>
 
-      <nav v-if="navItems.length" class="shell-nav">
+      <nav v-if="toolNavItems.length" class="shell-nav">
         <div class="shell-inner nav-row">
           <router-link
-            v-for="item in navItems"
+            v-for="item in toolNavItems"
             :key="item.path"
             :to="item.path"
             class="nav-link"
@@ -202,11 +271,14 @@ async function submitPassword() {
               </span>
               <template #dropdown>
                 <el-dropdown-menu>
-                  <el-dropdown-item command="password">
-                    <el-icon><Key /></el-icon> 修改密码
-                  </el-dropdown-item>
-                  <el-dropdown-item command="logout" divided>
-                    <el-icon><SwitchButton /></el-icon> 退出登录
+                  <el-dropdown-item
+                    v-for="item in accountMenu"
+                    :key="item.command"
+                    :command="item.command"
+                    :divided="item.divided"
+                  >
+                    <el-icon><component :is="item.icon" /></el-icon>&nbsp;&nbsp;
+                    <span>{{ item.label }}</span>
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -410,6 +482,11 @@ async function submitPassword() {
   gap: 10px;
 }
 
+/* 账号菜单里标记当前所在的框架页 */
+.menu-check {
+  margin-left: 8px;
+  color: var(--ep-brand-b);
+}
 .nav-back {
   border: 1px solid var(--ep-border);
   background: var(--ep-surface);
