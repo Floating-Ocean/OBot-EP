@@ -348,8 +348,10 @@ onMounted(() => {
 }
 
 .filter-btn.is-active {
+  /* 选中态是「反色药丸」：底色用 ink，字色就得用背景色 ——
+     写死 #fff 的话深色下 ink 变成近白，就成了白底白字 */
   background: var(--ep-ink);
-  color: #fff;
+  color: var(--ep-bg);
 }
 
 .filter-btn em {

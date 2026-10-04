@@ -140,10 +140,10 @@ function pendingTitle(item) {
   font-size: 11px;
   font-weight: 700;
   color: #fff;
-  background-image: var(--ep-brand-gradient);
+  background-image: var(--ep-brand-gradient-deep);
   border-radius: 999px;
   padding: 2px 10px;
-  box-shadow: 0 2px 8px rgba(122, 92, 255, 0.35);
+  box-shadow: 0 2px 8px rgba(78, 127, 112, 0.35);
 }
 
 .shot-body {
@@ -204,7 +204,7 @@ function pendingTitle(item) {
   font-size: 10.5px;
   padding: 0 5px;
   border-radius: 999px;
-  background: var(--ep-accent-tint, rgba(122, 92, 255, 0.12));
+  background: var(--ep-accent-tint, rgba(158, 87, 114, 0.07));
   color: var(--el-color-primary);
 }
 

@@ -58,6 +58,13 @@ const pickoneApi = {
    */
   apply: () => http.post(`${BASE}/admin/apply`, { dry_run: false }),
   conflicts: (params) => http.get(`${BASE}/admin/conflicts`, { params }),
+  /**
+   * 体检「已通过但已经不能直接下发」的提交单，把它们挂进「冲突待裁定」。
+   *
+   * 冲突判定平时只在下发那一瞬间做（下发预览是只读的），不主动跑这一下的话，
+   * 「两个人改了同一处」要等到第一次下发才会分出胜负。这个调用幂等，也不写数据文件。
+   */
+  scanConflicts: () => http.post(`${BASE}/admin/conflicts/scan`),
   resolveConflict: (id, keepNew) =>
     http.post(`${BASE}/admin/conflicts/${id}/resolve`, { keep_new: keepNew }),
   integrity: () => http.get(`${BASE}/admin/integrity`),

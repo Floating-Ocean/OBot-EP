@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import { session } from '@/stores/session'
+import { theme } from '@/stores/theme'
 import { currentPlugin, pluginBySlug } from '@/plugins/registry'
 import OBotLogo from '@/components/OBotLogo.vue'
 
@@ -34,35 +35,27 @@ onUnmounted(() => {
   window.removeEventListener('resize', syncViewport)
 })
 
-/** OBot-ACM 自己的版本号，从后端读（后端直接读它的源码常量）。 */
+/**
+ * 右上角只报两个版本：上游 OBot-ACM、本站 OBot-EP。
+ * 插件各自维护的模块版本（PickOne 的模块版本号等）不往这里塞 —— 那是工具自己的事，
+ * 需要露出的工具应该在自己的页面里显示。
+ */
 const versions = ref({})
 
-const versionLabel = computed(() => versions.value.obot ?? `v${APP_VERSION}`)
+const obotVersion = computed(() => versions.value.obot ?? '')
 
-/** 插件回报的上游模块版本，例如 PickOne 的模块版本号。 */
-const moduleVersions = computed(() =>
-  Object.entries(versions.value)
-    .filter(([key]) => !['obot', 'obot_base', 'commit', 'obot_ep'].includes(key))
-    .filter(([, value]) => value)
-    .map(([key, value]) => `${pluginBySlug(key)?.manifest.name ?? key} ${value}`),
-)
-
-const versionTitle = computed(() => {
-  const parts = [`本工具 OBot-EP v${APP_VERSION}`]
-  if (versions.value.obot) parts.push(`OBot-ACM ${versions.value.obot}`)
-  if (versions.value.commit) parts.push(`commit ${versions.value.commit}`)
-  parts.push(...moduleVersions.value)
-  return parts.join(' · ')
+/** 后端给的是裸版本号（0.2.0），页面上统一带 v；读不到就退回打包时写死的那个 */
+const epVersion = computed(() => {
+  const value = String(versions.value.obot_ep ?? APP_VERSION)
+  return value.startsWith('v') ? value : `v${value}`
 })
 
 onMounted(async () => {
   try {
-    // /meta/info 是登录后才读得到的完整版本信息（含 commit）；
-    // 公开的 /meta/versions 只给版本号，不带 commit。
-    const data = await api.meta()
-    versions.value = data.versions ?? {}
+    // /meta/versions 是公开接口，正好只给版本号（不带 commit），这里够用
+    versions.value = await api.versions()
   } catch {
-    /* 读不到就只显示本工具版本 */
+    /* 读不到就只显示本工具写死的版本号 */
   }
 })
 
@@ -145,7 +138,20 @@ const toolNavItems = computed(() => {
  * 全局动作收在右上角账号菜单里，那里本来就是「跟当前工具无关」的地方。
  */
 const accountMenu = computed(() => {
-  const items = [{ command: 'password', label: '修改密码', icon: 'Key' }]
+  const items = [
+    {
+      command: 'theme',
+      label: '颜色模式',
+      // 跟随系统时用中性图标，自己选过就显示对应的那半
+      icon:
+        theme.preference.value === 'system'
+          ? 'Monitor'
+          : theme.isDark.value
+            ? 'Moon'
+            : 'Sunny',
+    },
+    { command: 'password', label: '修改密码', icon: 'Key', divided: true },
+  ]
   if (session.isAdmin.value) {
     for (const item of CORE_ADMIN_NAV) {
       items.push({ ...item, command: `go:${item.path}`, divided: true })
@@ -168,10 +174,37 @@ const activePath = computed(() => {
 const passwordOpen = ref(false)
 const passwordForm = reactive({ old_password: '', new_password: '', confirm: '', busy: false })
 
+/*
+ * 颜色模式：先问「是否跟随系统」，不跟随时再挑浅色/深色。
+ * 改一下立刻生效（不等「保存」），所以对话框本身就是预览。
+ */
+const themeOpen = ref(false)
+
+const followSystem = computed({
+  get: () => theme.preference.value === 'system',
+  set: (on) => theme.set(on ? 'system' : theme.isDark.value ? 'dark' : 'light'),
+})
+
+const themeMode = computed({
+  // 关掉「跟随系统」时从当前实际生效的那一档接着走，不会突然跳回浅色
+  get: () =>
+    theme.preference.value === 'system'
+      ? theme.isDark.value
+        ? 'dark'
+        : 'light'
+      : theme.preference.value,
+  set: (value) => theme.set(value),
+})
+
 async function handleAccountCommand(command) {
   // 框架管理页从菜单里进：它们不属于任何工具，所以不占工具导航行
   if (command.startsWith('go:')) {
     router.push(command.slice(3))
+    return
+  }
+
+  if (command === 'theme') {
+    themeOpen.value = true
     return
   }
 
@@ -234,10 +267,27 @@ async function submitPassword() {
         </router-link>
 
         <!-- 右上角只留版本号，账号相关动作收进下面的导航行 -->
-        <span class="version" :title="versionTitle">
-          <span class="version-dot" />
-          <span class="version-obot">OBot {{ versionLabel }}</span>
-        </span>
+        <el-tooltip placement="bottom-end" effect="light" :show-after="120" :offset="10">
+          <template #content>
+            <div class="version-tip">
+              <div class="version-tip-row">
+                <span class="version-tip-key">OBot-ACM</span>
+                <span class="version-tip-val">{{ obotVersion || '未读到' }}</span>
+              </div>
+              <div class="version-tip-row">
+                <span class="version-tip-key">OBot-EP</span>
+                <span class="version-tip-val">{{ epVersion }}</span>
+              </div>
+              <span class="version-tip-note">上游 Bot 与本站维护工具的版本</span>
+            </div>
+          </template>
+          <span class="version">
+            <span class="version-dot" />
+            <template v-if="obotVersion">
+              <span class="version-obot">OBot {{ obotVersion }}</span>
+            </template>
+          </span>
+        </el-tooltip>
       </div>
 
       <nav v-if="toolNavItems.length" class="shell-nav">
@@ -294,6 +344,32 @@ async function submitPassword() {
       </router-view>
     </main>
 
+    <el-dialog v-model="themeOpen" title="颜色模式" width="440px">
+      <div class="theme-row">
+        <div>
+          <p class="theme-row-title">跟随系统</p>
+        </div>
+        <el-switch v-model="followSystem" size="large" />
+      </div>
+
+      <div class="theme-row theme-row--picked" :class="{ 'is-disabled': followSystem }">
+        <div>
+          <p class="theme-row-title">颜色模式</p>
+          <p class="theme-row-hint">
+            {{ followSystem ? '跟随系统时由系统决定' : '自己指定，覆盖系统设置' }}
+          </p>
+        </div>
+        <el-radio-group v-model="themeMode" :disabled="followSystem">
+          <el-radio-button value="light">浅色</el-radio-button>
+          <el-radio-button value="dark">深色</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <template #footer>
+        <el-button type="primary" @click="themeOpen = false">完成</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="passwordOpen" title="修改密码" width="440px">
       <el-form label-position="top">
         <el-form-item label="原密码">
@@ -338,6 +414,11 @@ async function submitPassword() {
   position: sticky;
   top: 0;
   z-index: 10;
+}
+
+/* 顶栏与导航条是「半透明白玻璃」，深色下要换成深色玻璃（同一个变量换不了透明度底） */
+html.dark .shell-bar {
+  background: rgba(20, 25, 33, 0.82);
 }
 
 .shell-inner {
@@ -423,6 +504,50 @@ async function submitPassword() {
   color: var(--ep-ink-muted);
 }
 
+.version-sep {
+  color: var(--ep-border-strong);
+}
+
+.version-ep {
+  font-weight: 600;
+  color: var(--ep-ink-faint);
+}
+
+/* tip：两行键值 + 一行说明，比原生 title 那种挤成一行、还带插件版本的长串好读 */
+.version-tip {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 186px;
+  padding: 2px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.version-tip-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.version-tip-key {
+  color: var(--ep-ink-faint);
+}
+
+.version-tip-val {
+  font-family: var(--ep-font-mono);
+  font-weight: 700;
+}
+
+.version-tip-note {
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ep-border);
+  color: var(--ep-ink-faint);
+  font-size: 11.5px;
+}
+
 /* 头像里可能是一个 emoji（宽度远大于单个字母），缩一号字保证放得下 */
 :deep(.el-avatar) {
   font-size: 15px;
@@ -431,7 +556,7 @@ async function submitPassword() {
 
 /* 账号头像改用通用人形图标：昵称可能是 emoji 或符号，取首字既不稳定也不好看 */
 .account-avatar {
-  background: linear-gradient(145deg, rgba(255, 95, 126, 0.16), rgba(123, 92, 255, 0.2));
+  background: linear-gradient(145deg, rgba(168, 213, 194, 0.32), rgba(95, 141, 126, 0.26));
   color: var(--ep-brand-b);
 }
 
@@ -443,6 +568,10 @@ async function submitPassword() {
 .shell-nav {
   border-top: 1px solid var(--ep-border);
   background: rgba(255, 255, 255, 0.45);
+}
+
+html.dark .shell-nav {
+  background: rgba(20, 25, 33, 0.5);
 }
 
 .nav-row {
@@ -465,14 +594,18 @@ async function submitPassword() {
 }
 
 .nav-link:hover {
-  background: rgba(20, 22, 31, 0.05);
+  background-color: rgba(20, 22, 31, 0.05);
   color: var(--ep-ink);
 }
 
+html.dark .nav-link:hover {
+  background-color: rgba(255, 255, 255, 0.07);
+}
+
 .nav-link.is-active {
-  background-image: var(--ep-brand-gradient);
+  background-image: var(--ep-brand-gradient-deep);
   color: #fff;
-  box-shadow: 0 6px 16px rgba(122, 92, 255, 0.28);
+  box-shadow: 0 6px 16px rgba(78, 127, 112, 0.28);
 }
 
 .nav-right {
@@ -480,6 +613,44 @@ async function submitPassword() {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* ---- 颜色模式对话框 ---- */
+
+.theme-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.theme-row + .theme-row {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--ep-border);
+}
+
+.theme-row-title {
+  margin: 0;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ep-ink);
+}
+
+.theme-row-hint {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--ep-ink-faint);
+}
+
+.theme-row--picked {
+  margin-bottom: 16px;
+}
+
+/* 跟随系统时「颜色模式」是灰的，让它再淡一点，别看着像可点的 */
+.theme-row--picked.is-disabled {
+  opacity: 0.6;
+  margin-bottom: 16px;
 }
 
 /* 账号菜单里标记当前所在的框架页 */
@@ -503,9 +674,17 @@ async function submitPassword() {
   line-height: 18px;
 }
 
+/* 选中态是深青药丸：红数字压在绿底上太打架，改成白底青字 */
 .nav-link.is-active .nav-badge {
   background: #fff;
-  color: var(--ep-danger);
+  color: var(--ep-brand-b);
+}
+
+/* 深色下 --ep-danger 是提亮过的「文字红」，拿来当实心底又亮又压不住白字；
+   实心改回按钮那支深红（白字 4.9:1），也不那么抢眼。
+   选中态那条 (0,3,0) 优先级更高，白底青字不受影响 */
+html.dark .nav-badge {
+  background: var(--el-color-danger);
 }
 
 .account {

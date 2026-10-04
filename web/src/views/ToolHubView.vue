@@ -150,14 +150,14 @@ onMounted(load)
   background-image: linear-gradient(145deg, var(--ep-accent-strong), var(--ep-accent-tint));
   border: 1px solid var(--ep-accent-track);
   font-size: 21px;
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   flex: none;
 }
 
 .tool-name {
   font-size: 24px;
   font-weight: 700;
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   letter-spacing: -0.02em;
 }
 

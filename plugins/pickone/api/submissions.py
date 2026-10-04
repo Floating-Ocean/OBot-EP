@@ -244,7 +244,7 @@ def list_submissions(
         "items": [item.to_dict() for item in rows],
         # counts 是本插件各状态的数字，mine 是当前用户自己的
         "counts": repo.count_by_status(SLUG),
-        "mine": repo.count_by_status_for_author(user.id),
+        "mine": repo.count_by_status_for_author(user.id, plugin=SLUG),
     }
 
 

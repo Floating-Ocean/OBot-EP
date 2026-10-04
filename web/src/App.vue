@@ -7,8 +7,15 @@ import { session } from '@/stores/session'
 
 const route = useRoute()
 
+/**
+ * 首次导航要等 `router/index.js` 的守卫跑完 `/api/meta` 才知道该去哪。
+ * 在那之前 `route.matched` 是空的 —— 必须先什么都不渲染：否则 `route.meta.public`
+ * 还是 undefined，会先把工具外壳（导航栏、版本号）画出来，再跳去登录页。
+ */
+const routeReady = computed(() => route.matched.length > 0)
+
 /** 登录页等公开页面不套外壳（否则登录前也会看到工具导航）。 */
-const useShell = computed(() => !route.meta.public)
+const useShell = computed(() => routeReady.value && !route.meta.public)
 
 /** 审核台角标：管理员才需要，且只在有东西待处理时才拉一次。 */
 const pendingCount = ref(0)
@@ -48,5 +55,5 @@ onMounted(loadPending)
     :pending-count="pendingCount"
     @refresh-summary="onRefreshSummary"
   />
-  <router-view v-else />
+  <router-view v-else-if="routeReady" />
 </template>

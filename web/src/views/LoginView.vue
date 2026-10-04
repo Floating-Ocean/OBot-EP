@@ -177,7 +177,7 @@ onMounted(loadConfig)
   height: 620px;
   top: -220px;
   left: -140px;
-  background: rgba(123, 92, 255, 0.3);
+  background: rgba(95, 141, 126, 0.3);
 }
 
 .login-glow--b {
@@ -185,7 +185,7 @@ onMounted(loadConfig)
   height: 540px;
   bottom: -200px;
   right: -120px;
-  background: rgba(255, 95, 126, 0.26);
+  background: rgba(93, 144, 178, 0.3);
 }
 
 .login-card {

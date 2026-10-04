@@ -3,7 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>OBot's Endpoint</title>
+    <script>
+      /*
+       * 主题必须在首帧之前定下来，否则深色用户会先看到一帧浅色。
+       * 规则与 web/src/stores/theme.js 一致：偏好是 'system' / 'light' / 'dark' 三选一，
+       * 解析结果写进 <html data-theme>，store 起来后直接读它，不再重复解析一遍。
+       */
+      try {
+        var saved = localStorage.getItem('obot-ep.theme')
+        var pref = saved === 'light' || saved === 'dark' ? saved : 'system'
+        document.documentElement.dataset.theme = pref
+        var dark =
+          pref === 'dark' ||
+          (pref === 'system' &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches)
+        if (dark) document.documentElement.classList.add('dark')
+      } catch (error) {
+        document.documentElement.dataset.theme = 'system'
+      }
+    </script>
   </head>
   <body>
     <div id="app"></div>

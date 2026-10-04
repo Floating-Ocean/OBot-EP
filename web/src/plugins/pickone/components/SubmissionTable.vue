@@ -109,7 +109,7 @@ const hasWithdrawableRow = computed(() => hasSelectableRow.value)
       :selectable="isRowSelectable"
     />
 
-    <el-table-column v-if="verbose" label="ID" prop="id" width="78" />
+    <el-table-column v-if="verbose" label="ID" prop="id" width="90" />
 
     <el-table-column label="类别 / 目标" min-width="252" show-overflow-tooltip>
       <template #default="{ row }">
@@ -156,37 +156,16 @@ const hasWithdrawableRow = computed(() => hasSelectableRow.value)
     <!-- 状态：chip 只放短文案，完整说明挂在 tooltip 上 -->
     <el-table-column label="状态" width="132">
       <template #default="{ row }">
-        <el-tooltip
-          :content="statusMeta(row.status).label"
-          placement="top"
-          :show-after="150"
-          :disabled="statusMeta(row.status).label === statusMeta(row.status).short"
+        <span
+          class="ep-chip"
+          :class="{
+            'ep-chip--warn': row.status === 'pending',
+            'ep-chip--ok': row.status === 'applied',
+            'ep-chip--danger': row.status === 'conflict',
+          }"
         >
-          <span
-            class="ep-chip"
-            :class="{
-              'ep-chip--warn': row.status === 'pending',
-              'ep-chip--ok': row.status === 'applied',
-              'ep-chip--danger': row.status === 'conflict',
-            }"
-          >
-            {{ statusMeta(row.status).short }}
-          </span>
-        </el-tooltip>
-        <div
-          v-if="row.status === 'conflict' && verbose"
-          class="ep-small conflict-note"
-          :title="row.conflict_detail?.reason"
-        >
-          {{ row.conflict_detail?.reason ?? '需要管理员处理' }}
-        </div>
-        <div
-          v-else-if="row.review_comment"
-          class="ep-small ep-faint"
-          :title="row.review_comment"
-        >
-          {{ row.review_comment }}
-        </div>
+          {{ statusMeta(row.status).short }}
+        </span>
       </template>
     </el-table-column>
 

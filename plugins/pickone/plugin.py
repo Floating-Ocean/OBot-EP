@@ -34,11 +34,11 @@ _MANIFEST = PluginManifest(
     order=10,
     submission_types=SUBMISSION_TYPES,
     accent={
-        "tint": "rgba(122, 92, 255, 0.10)",
-        "tint_strong": "rgba(122, 92, 255, 0.26)",
-        "ink": "#5a3ec8",
-        "track": "rgba(122, 92, 255, 0.2)",
-        "glow": "rgba(122, 92, 255, 0.32)",
+        "tint": "rgba(158, 87, 114, 0.07)",
+        "tint_strong": "rgba(158, 87, 114, 0.14)",
+        "ink": "#764156",
+        "track": "rgba(158, 87, 114, 0.16)",
+        "glow": "rgba(158, 87, 114, 0.24)",
     },
 )
 

@@ -230,7 +230,7 @@ async function submit() {
   busy.value = true
   try {
     if (reverted.value) {
-      await api.withdraw(myPendingItem.value.submission_id)
+      await api.pickone.withdraw(myPendingItem.value.submission_id)
       ElMessage.success('已撤销改回原值的提交')
     } else {
       await api.submit(props.category.img_key, isNew.value ? 'category_create' : 'category', {
@@ -364,13 +364,6 @@ async function submit() {
   gap: 10px;
   width: 100%;
   margin-top: 10px;
-}
-
-.hint {
-  font-size: 12.5px;
-  color: var(--ep-ink-faint);
-  line-height: 1.6;
-  margin-top: 8px;
 }
 
 /* 和图片编辑抽屉同一套排版：chip / 作者+状态 / 原值 → 新值 */

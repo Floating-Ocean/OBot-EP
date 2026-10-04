@@ -11,11 +11,11 @@ export default {
   home: '/pickone',
   order: 10,
   accent: {
-    tint: 'rgba(122, 92, 255, 0.10)',
-    tint_strong: 'rgba(122, 92, 255, 0.26)',
-    ink: '#5a3ec8',
-    track: 'rgba(122, 92, 255, 0.2)',
-    glow: 'rgba(122, 92, 255, 0.32)',
+    tint: 'rgba(158, 87, 114, 0.07)',
+    tint_strong: 'rgba(158, 87, 114, 0.14)',
+    ink: '#764156',
+    track: 'rgba(158, 87, 114, 0.16)',
+    glow: 'rgba(158, 87, 114, 0.24)',
   },
   /** 进入本工具后，导航栏左边这几个入口 */
   nav: [

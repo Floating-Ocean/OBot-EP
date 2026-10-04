@@ -67,11 +67,16 @@ const batchEnabled = computed(() => BATCH_TABS.has(activeTab.value))
 
 /**
  * 标签上的数字。
- * counts 里只有具体状态，没有 all —— 「全部」用队列返回的 total，
- * 否则会一直显示 (0)。
+ *
+ * `counts` 是本工具各状态的条数（跟当前标签页无关），所以「全部」用它们的和。
+ * **不能用队列返回的 `total`** —— 那是当前标签页的条数，切个标签页「全部」就跟着变。
  */
+const allCount = computed(() =>
+  Object.values(counts.value).reduce((sum, value) => sum + (Number(value) || 0), 0),
+)
+
 function tabLabel(tab) {
-  const value = tab.name === 'all' ? total.value : (counts.value[tab.name] ?? 0)
+  const value = tab.name === 'all' ? allCount.value : (counts.value[tab.name] ?? 0)
   return `${tab.label} (${value})`
 }
 
@@ -109,9 +114,27 @@ async function loadOverview() {
  * 一键下发的启用看的是「已通过待下发」的条数。
  * counts 来自队列接口，每次加载都会刷新，所以审核完按钮立刻可用，
  * 不再依赖单独拉一次 id 列表（那样在别的标签页会拿到旧值）。
+ *
+ * 先体检再取队列：这样「两个人改了同一处」在过审那一刻就分出胜负（最早过审的留在
+ * 待下发，其余进「冲突待裁定」），本次渲染里就能看到结果。
  */
 async function loadAll() {
+  await scanConflicts()
   await Promise.all([load(), loadOverview()])
+}
+
+/**
+ * 体检「已通过但已经不能直接下发」的提交单。
+ *
+ * 冲突判定本来只在下发那一瞬间做，而下发预览是只读的（dry-run 不改状态），
+ * 所以在那之前冲突表一直是空的。这里主动跑一遍同一套判定（不写数据，幂等）。
+ */
+async function scanConflicts() {
+  try {
+    await api.pickone.scanConflicts()
+  } catch {
+    /* 体检失败不影响队列本身；真的下发时还会再判一次 */
+  }
 }
 
 function switchTab(name) {
@@ -120,7 +143,9 @@ function switchTab(name) {
   load()
 }
 
-function jumpToConflicts() {
+async function jumpToConflicts() {
+  // 先体检：从下发预览点「去处理冲突」过来时，冲突还没挂进表里
+  await scanConflicts()
   switchTab('conflict')
 }
 
@@ -201,6 +226,9 @@ function openConflict(row) {
     reason: row.conflict_detail?.reason,
     base_value: row.conflict_detail?.base_value,
     current_value: row.conflict_detail?.current_value,
+    // 对手：同一个字段上更早过审的那条（没有就是被 Bot 改过）
+    rival_id: row.conflict_detail?.rival_id,
+    rival_author_name: row.conflict_detail?.rival_author_name,
     submitted_value: row.submitted_value,
   }
   conflictOpen.value = true
@@ -315,7 +343,7 @@ async function doApply() {
     if (held) {
       ElMessage.warning(
         `已写入图片字段 ${result.applied_images} 处、类别 ${result.applied_categories} 个；` +
-          `另有 ${held} 条因原值被改动而暂缓下发，请到「冲突待裁定」处理`,
+          `另有 ${held} 条暂缓下发（原值被改动，或同一处已被更早过审的改动占了），请到「冲突待裁定」处理`,
       )
     } else {
       ElMessage.success(
@@ -392,19 +420,6 @@ onMounted(loadAll)
         <div class="ep-stat-value">{{ rejectedCount }}</div>
       </div>
     </div>
-
-    <el-alert
-      v-if="conflictCount"
-      type="error"
-      :closable="false"
-      show-icon
-      class="ep-section"
-      :title="`有 ${conflictCount} 条提交的原值已被改动，下发前需要逐条裁定`"
-    >
-      <el-button size="small" type="danger" class="alert-btn" @click="jumpToConflicts">
-        去处理
-      </el-button>
-    </el-alert>
 
     <div class="ep-card ep-card--flush">
       <el-tabs v-model="activeTab" class="queue-tabs" @tab-change="switchTab">
@@ -642,7 +657,7 @@ onMounted(loadAll)
 }
 
 .alert-btn {
-  margin-top: 8px;
+  margin-top: 6px;
 }
 
 /* 抽屉底部：左侧说明 + 右侧按钮 */

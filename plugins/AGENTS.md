@@ -123,7 +123,8 @@ repo.upsert_submission(
 ```
 pending --审核通过--> approved --一键应用--> applied
    \--审核驳回--> rejected
-approved --应用时发现磁盘原值被改--> conflict --裁定--> approved / rejected
+approved --下发前发现冲突--> conflict --裁定保留新值--> approved --一键应用--> applied
+                                    \--裁定丢弃--> rejected
 ```
 
 同一 `(plugin, type, img_key, target, author_id)` 只允许一条「在途」提交，反复改同一字段是覆盖
@@ -132,6 +133,18 @@ approved --应用时发现磁盘原值被改--> conflict --裁定--> approved / 
 > 冲突检测不是必须的。数据文件如果只有这个工具在写，直接覆盖就行；如果 Bot 也写同一个文件，
 > 就该在 apply 时比对 `base_value` 与磁盘现值，不一致挂成 `conflict` ——
 > 完整实现见 `plugins/pickone/changes.py`。
+>
+> 同一处被**两个人都改了**时（两个用户改同一字段 / 同一类别），两者的规则必须一致：
+> 只有**最早过审**的那条能下发（按 `reviewed_at` 排，不是提交单 id），其余挂成冲突；
+> 裁定「保留新值」是一次**交换** —— 这条排回 `approved`，被它取代的那条（还在待下发的
+> 对手，记在 `Conflict.rival` 里）改成 `rejected`，写盘交给下一次一键下发。裁定时要同时
+> 把这条的 `base_value` 挪到磁盘现值（`repo.resolve_submission_conflict(base_value=...)`），
+> 否则下一次下发会拿旧基准再判一次冲突。审核台每次刷新跑一遍 `scan_conflicts()`，
+> 这个胜负在过审那一刻就分出来。
+>
+> **对手会换人**：裁定保留 #2 之后，同一处上还挂着的 #3 该对照的是 #2 而不是已经作废的
+> #1。所以 `scan_conflicts()` 里还要跑一遍 `refresh_conflicts()`（只看 `conflict` 里的行，
+> 只改 `conflict_detail`，状态一律不动），否则管理员在裁定弹窗里看到的是别人的旧值。
 
 ## 4. 前端契约
 

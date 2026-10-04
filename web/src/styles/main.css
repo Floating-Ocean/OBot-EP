@@ -25,10 +25,13 @@
   --ep-ink-muted: #5b6076;
   --ep-ink-faint: #8b90a6;
 
-  /* 品牌渐变 */
-  --ep-brand-a: #ff5f7e;
-  --ep-brand-b: #7b5cff;
+  /* 品牌渐变：雾蓝 → 青瓷。蓝那支是 secondary，背景弥散光斑与登录页柔光也用它 */
+  --ep-brand-a: #5d90b2;
+  --ep-brand-b: #4e7f70;
+  --ep-brand-secondary: #5d90b2;
   --ep-brand-gradient: linear-gradient(135deg, var(--ep-brand-a), var(--ep-brand-b));
+  /* 实心块上要放白字的（导航选中态、图片角标）：蓝端对比度不够，另起一支纯青瓷 */
+  --ep-brand-gradient-deep: linear-gradient(135deg, #5f8d7e, #3e665a);
 
   /* 类别配色默认值（具体类别由后端 accent 覆盖） */
   --ep-accent-ink: #333333;
@@ -36,14 +39,17 @@
   --ep-accent-strong: rgba(0, 0, 0, 0.09);
   --ep-accent-track: rgba(0, 0, 0, 0.06);
   --ep-accent-glow: rgba(0, 0, 0, 0.1);
+  /* 真正用来写字的那支：浅色下就是 accent-ink，深色下要换成亮版（见文件末尾 html.dark） */
+  --ep-accent-text: var(--ep-accent-ink);
 
-  /* 语义色：与品牌紫保持同一饱和度水平，避免各说各话 */
+  /* 语义色：与品牌青保持同一饱和度水平，避免各说各话 */
   --ep-warn: #b26a00;
   --ep-warn-tint: rgba(178, 106, 0, 0.12);
   --ep-danger: #cc3b48;
   --ep-danger-tint: rgba(204, 59, 72, 0.1);
-  --ep-ok: #1e7d55;
-  --ep-ok-tint: rgba(30, 125, 85, 0.1);
+  /* 通过色刻意比品牌青更黄更饱和：两者都是绿系，靠色相拉开才不会看混 */
+  --ep-ok: #2e7d32;
+  --ep-ok-tint: rgba(46, 125, 50, 0.1);
 
   /* 尺寸 */
   --ep-radius-sm: 10px;
@@ -60,13 +66,49 @@
   --ep-font-mono: 'JetBrains Mono', 'Cascadia Mono', ui-monospace, Consolas, monospace;
 
   /* Element Plus 贴合这套配色 */
-  --el-color-primary: #6257ff;
-  --el-color-primary-light-3: #9089ff;
-  --el-color-primary-light-5: #b0abff;
-  --el-color-primary-light-7: #d0ccff;
-  --el-color-primary-light-8: #dfdcff;
-  --el-color-primary-light-9: #eeecff;
-  --el-color-primary-dark-2: #4e45cc;
+  --el-color-primary: #4e7f70;
+  --el-color-primary-light-3: #83a59b;
+  --el-color-primary-light-5: #a6bfb8;
+  --el-color-primary-light-7: #cad9d4;
+  --el-color-primary-light-8: #dce5e2;
+  --el-color-primary-light-9: #edf2f1;
+  --el-color-primary-dark-2: #3e665a;
+  /* 语义里的「成功」也用我们自己那支深绿：Element 自带的 #67c23a 太艳，
+     审核按钮和 ElMessage 的对勾图标都吃这一组 */
+  --el-color-success: #2e7d32;
+  --el-color-success-light-3: #6da470;
+  --el-color-success-light-5: #96be98;
+  --el-color-success-light-7: #c0d8c2;
+  --el-color-success-light-8: #d5e5d6;
+  --el-color-success-light-9: #eaf2ea;
+  --el-color-success-dark-2: #256428;
+  /* 「错误」同理：Element 自带的 #f56c6c 偏珊瑚粉，映射到我们自己的 --ep-danger。
+     error 与 danger 在 Element 里是同一支颜色的两个名字，两个都要给 */
+  --el-color-danger: #cc3b48;
+  --el-color-danger-light-3: #db767f;
+  --el-color-danger-light-5: #e69da4;
+  --el-color-danger-light-7: #f0c4c8;
+  --el-color-danger-light-8: #f5d8da;
+  --el-color-danger-light-9: #faebed;
+  --el-color-danger-dark-2: #a32f3a;
+  --el-color-danger-rgb: 204, 59, 72;
+  --el-color-error: #cc3b48;
+  --el-color-error-light-3: #db767f;
+  --el-color-error-light-5: #e69da4;
+  --el-color-error-light-7: #f0c4c8;
+  --el-color-error-light-8: #f5d8da;
+  --el-color-error-light-9: #faebed;
+  --el-color-error-dark-2: #a32f3a;
+  --el-color-error-rgb: 204, 59, 72;
+  /* 「警告」同理：Element 自带的 #e6a23c 比我们的 --ep-warn 亮一档 */
+  --el-color-warning: #b26a00;
+  --el-color-warning-light-3: #c9974c;
+  --el-color-warning-light-5: #d8b480;
+  --el-color-warning-light-7: #e8d2b2;
+  --el-color-warning-light-8: #f0e1cc;
+  --el-color-warning-light-9: #f7f0e6;
+  --el-color-warning-dark-2: #8e5500;
+  --el-color-warning-rgb: 178, 106, 0;
   --el-border-radius-base: 10px;
   --el-font-size-base: 14px;
 }
@@ -91,9 +133,9 @@ body {
   text-rendering: optimizeLegibility;
   background-color: var(--ep-bg);
   background-image:
-    radial-gradient(1100px 520px at 6% -10%, rgba(123, 92, 255, 0.15), transparent 62%),
-    radial-gradient(900px 500px at 98% 0%, rgba(255, 95, 126, 0.12), transparent 58%),
-    radial-gradient(1000px 620px at 50% 110%, rgba(64, 158, 255, 0.09), transparent 62%),
+    radial-gradient(1100px 520px at 6% -10%, rgba(95, 141, 126, 0.16), transparent 62%),
+    radial-gradient(900px 500px at 98% 0%, rgba(93, 144, 178, 0.18), transparent 58%),
+    radial-gradient(1000px 620px at 50% 110%, rgba(78, 127, 112, 0.1), transparent 62%),
     linear-gradient(180deg, var(--ep-bg-soft), var(--ep-bg) 44%);
   background-attachment: fixed;
 }
@@ -186,6 +228,9 @@ h3 {
   position: relative;
   display: flex;
   flex-direction: column;
+  /* 卡片是 <button>：不写死底色的话，深色下 UA 的 ButtonFace（中灰）会从
+     半透明渐变底下透出来，整块发白 */
+  background-color: var(--ep-surface);
   background-image: linear-gradient(
     145deg,
     var(--ep-accent-strong) 0%,
@@ -207,7 +252,7 @@ h3 {
   position: absolute;
   inset: 0 0 auto 0;
   height: 3px;
-  background: linear-gradient(90deg, var(--ep-accent-ink), transparent 78%);
+  background: linear-gradient(90deg, var(--ep-accent-text), transparent 78%);
   opacity: 0.45;
 }
 
@@ -227,7 +272,7 @@ h3 {
 .ep-tile-name {
   font-size: 23px;
   font-weight: 700;
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   line-height: 1.3;
   padding-right: 72px;
 }
@@ -237,7 +282,7 @@ h3 {
   margin-top: 18px;
   font-size: 13.5px;
   line-height: 1.75;
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   opacity: 0.8;
   flex: 1 1 auto;
 }
@@ -251,7 +296,7 @@ h3 {
   flex: none;
   font-size: 13px;
   font-weight: 600;
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   opacity: 0.86;
 }
 
@@ -274,14 +319,14 @@ h3 {
   font-variant-numeric: tabular-nums;
   background-image: linear-gradient(
     160deg,
-    var(--ep-accent-ink) 0%,
-    var(--ep-accent-ink) 55%,
+    var(--ep-accent-text) 0%,
+    var(--ep-accent-text) 55%,
     transparent 130%
   );
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  opacity: 0.32;
+  opacity: 0.12;
   pointer-events: none;
 }
 
@@ -297,7 +342,7 @@ h3 {
 .ep-tile-bar > i {
   display: block;
   height: 100%;
-  background: var(--ep-accent-ink);
+  background: var(--ep-accent-text);
   opacity: 0.5;
   border-radius: 0 4px 4px 0;
 }
@@ -335,7 +380,7 @@ h3 {
 
 .ep-chip--accent {
   background: var(--ep-accent-strong);
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   border: 1px solid var(--ep-accent-track);
 }
 
@@ -356,7 +401,7 @@ h3 {
   font-weight: 600;
   line-height: 1.5;
   white-space: nowrap;
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   /* 半透明白底压一层，保证在任意色相上都有足够对比 */
   background: rgba(255, 255, 255, 0.66);
   border: 1px solid rgba(255, 255, 255, 0.9);
@@ -380,7 +425,7 @@ h3 {
 .ep-status--done {
   padding-left: 12px;
   background: rgba(255, 255, 255, 0.5);
-  color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
   opacity: 0.7;
 }
 
@@ -395,8 +440,8 @@ h3 {
 /* 待创建：整块用色相描边强调 */
 .ep-status--new {
   background: rgba(255, 255, 255, 0.86);
-  color: var(--ep-accent-ink);
-  border-color: var(--ep-accent-ink);
+  color: var(--ep-accent-text);
+  border-color: var(--ep-accent-text);
 }
 
 /* ---------- 统计条 ---------- */
@@ -813,4 +858,197 @@ h3 {
   .ep-stat {
     padding: 20px 22px;
   }
+}
+
+/* ---------- 深色主题 ---------- */
+
+/*
+ * 只换变量，不换结构。`html.dark` 由 web/src/stores/theme.js 切换，
+ * web/index.html 里那段内联脚本保证首帧就是对的（不然会先闪一下浅色）。
+ *
+ * 三条约定：
+ *   - 背景不用纯黑，带一点蓝，跟品牌青/雾蓝同调；
+ *   - 品牌色在深底上要提亮，否则整块发闷。只有 --ep-brand-gradient-deep
+ *     （导航选中态、图片角标那些放白字的地方）保持原样：它本来就是深的，
+ *     换亮了白字反而看不清；
+ *   - 语义色整套提亮 —— 浅色下的 #2e7d32 压在深底上根本读不出来。
+ */
+html.dark {
+  color-scheme: dark;
+
+  --ep-bg: #12161d;
+  --ep-bg-soft: #171c24;
+
+  --ep-surface: #1a1f28;
+  --ep-surface-sunken: #151a22;
+  --ep-border: #2a313c;
+  --ep-border-strong: #3b4453;
+
+  --ep-ink: #e7eaf1;
+  --ep-ink-muted: #a6adbc;
+  --ep-ink-faint: #788193;
+
+  --ep-brand-a: #7fb5d4;
+  --ep-brand-b: #6aab98;
+
+  /* 类别配色的兜底（具体类别由后端 accent 覆盖）在深色下反过来用白 */
+  --ep-accent-ink: #d6dae3;
+  --ep-accent-tint: rgba(255, 255, 255, 0.05);
+  --ep-accent-strong: rgba(255, 255, 255, 0.1);
+  --ep-accent-track: rgba(255, 255, 255, 0.12);
+  --ep-accent-glow: rgba(0, 0, 0, 0.5);
+
+  /*
+   * 语义色在深底上要提亮才读得出来（浅色那支 #2e7d32 压在深底上几乎看不见），
+   * 但别往霓虹方向走：暖色在同等亮度下本来就显得比绿暗，warn 要再亮一档；
+   * danger 只是「文字色」，别亮到抢戏 —— 实心红另见 ToolShell 的 .nav-badge。
+   */
+  --ep-warn: #ecb45c;
+  --ep-warn-tint: rgba(236, 180, 92, 0.16);
+  --ep-danger: #d07d85;
+  --ep-danger-tint: rgba(208, 125, 133, 0.16);
+  --ep-ok: #6cc47a;
+  --ep-ok-tint: rgba(108, 196, 122, 0.16);
+
+  --ep-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 3px 10px rgba(0, 0, 0, 0.3);
+  --ep-shadow-md: 0 6px 16px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.4);
+
+  /*
+   * Element Plus 的四支语义色沿用我们的品牌色（它们本身够深，深色下当按钮底色正好），
+   * light-N / dark-2 按 Element 深色主题的规则重算：light-N 跟 #141414 混、dark-2 跟白混。
+   * 不重算的话，Element 深色主题自带的 --el-color-primary(#409eff) 会盖掉上面的品牌青。
+   */
+  --el-color-primary: #6fb79b;
+  --el-color-primary-light-3: #548672;
+  --el-color-primary-light-5: #426658;
+  --el-color-primary-light-7: #2f453c;
+  --el-color-primary-light-8: #26352f;
+  --el-color-primary-light-9: #1d2422;
+  --el-color-primary-dark-2: #8cc5af;
+  --el-color-success: #2e7d32;
+  --el-color-success-light-3: #265e29;
+  --el-color-success-light-5: #214823;
+  --el-color-success-light-7: #1c341d;
+  --el-color-success-light-8: #19291a;
+  --el-color-success-light-9: #171e17;
+  --el-color-success-dark-2: #58975b;
+  --el-color-danger: #cc3b48;
+  --el-color-danger-light-3: #952f38;
+  --el-color-danger-light-5: #70282e;
+  --el-color-danger-light-7: #4b2024;
+  --el-color-danger-light-8: #391c1e;
+  --el-color-danger-light-9: #261819;
+  --el-color-danger-dark-2: #d6626d;
+  --el-color-danger-rgb: 204, 59, 72;
+  --el-color-error: #cc3b48;
+  --el-color-error-light-3: #952f38;
+  --el-color-error-light-5: #70282e;
+  --el-color-error-light-7: #4b2024;
+  --el-color-error-light-8: #391c1e;
+  --el-color-error-light-9: #261819;
+  --el-color-error-dark-2: #d6626d;
+  --el-color-error-rgb: 204, 59, 72;
+  --el-color-warning: #b26a00;
+  --el-color-warning-light-3: #835006;
+  --el-color-warning-light-5: #633f0a;
+  --el-color-warning-light-7: #432e0e;
+  --el-color-warning-light-8: #342510;
+  --el-color-warning-light-9: #241d12;
+  --el-color-warning-dark-2: #c18833;
+  --el-color-warning-rgb: 178, 106, 0;
+}
+
+/* 弥散光斑在深底上要更实一点才看得出来，色相不变 */
+html.dark body {
+  background-image:
+    radial-gradient(1100px 520px at 6% -10%, rgba(106, 171, 152, 0.18), transparent 62%),
+    radial-gradient(900px 500px at 98% 0%, rgba(127, 181, 212, 0.16), transparent 58%),
+    radial-gradient(1000px 620px at 50% 110%, rgba(78, 127, 112, 0.14), transparent 62%),
+    linear-gradient(180deg, var(--ep-bg-soft), var(--ep-bg) 44%);
+}
+
+/*
+ * 深色下主色是「当文字用」的浅青（选中 tab、链接、描边按钮都吃它），
+ * 实心主按钮上再压白字就只剩 2.3:1 了 —— 实心那支反过来用深色字。
+ * 描边 / 文字按钮本来就是浅青字压深底，排除掉；禁用态也跟着 Element 那套走。
+ */
+html.dark .el-button--primary:not(.is-plain):not(.is-text):not(.is-link):not(.is-disabled) {
+  --el-button-text-color: #0f1c18;
+  --el-button-hover-text-color: #0f1c18;
+  --el-button-active-text-color: #0f1c18;
+}
+
+/*
+ * 卡片右上角那个大数字是块「水印」：浅色下用类别深色压浅底刚刚好，
+ * 深色下同一支色（已被提亮）再乘 0.32 透明度就彻底看不见了 —— 换成淡淡的白色。
+ */
+html.dark .ep-tile-count {
+  background-image: linear-gradient(160deg, #fff 0%, #fff 55%, transparent 130%);
+  opacity: 0.6;
+}
+
+/*
+ * 「勾选类」控件里那些默认跟白色走的东西：复选框的勾、单选/复选按钮选中的文字。
+ * 它们压在深色下这支浅青填充上就是白底白字（勾只有 2.3:1），改成深色。
+ *
+ * 必须打在组件自己的类上 —— Element 是这么声明的：
+ *   .el-checkbox { --el-checkbox-checked-icon-color: var(--el-color-white); }
+ * 变量声明在元素自身上，就永远压过从 html.dark 继承下来的值，只写 html.dark 等于没写。
+ * 开关（el-switch）的滑块保持白色：那是个实心圆点，Element 深色主题也这么配。
+ */
+html.dark .el-checkbox {
+  --el-checkbox-checked-icon-color: #0f1c18;
+}
+
+html.dark .el-checkbox-button {
+  --el-checkbox-button-checked-text-color: #0f1c18;
+}
+
+html.dark .el-radio-button {
+  --el-radio-button-checked-text-color: #0f1c18;
+}
+
+/* 中性徽标原来是「深色低透明度底」，深色下换成白色低透明度 */
+html.dark .ep-chip {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/*
+ * 类别色（含两个插件的 accent）是后端按浅色卡片算的深色号，深色下压在深底上读不出来。
+ * 这里只把「写字的那支」往白色提亮，底色不动 —— 那层低透明度色晕在深底上正好。
+ *
+ * 用 oklch 而不是 srgb 混：srgb 里跟白色混会一路掉饱和度，提亮的同时颜色也灰了，
+ * 42% 那版就是这么变得看不清的；oklch 混出来的亮度够、色相还在。
+ *
+ * 定义在元素自己身上（而不是 :root），才能确保 var(--ep-accent-ink) 取到它内联的那份。
+ * 不支持 color-mix 的浏览器会让这个值失效，文字退化成继承正文字色，仍然可读。
+ */
+.ep-page,
+.ep-tile {
+  --ep-accent-text: var(--ep-accent-ink);
+}
+
+html.dark .ep-page,
+html.dark .ep-tile,
+html.dark .ep-chip--accent {
+  --ep-accent-text: color-mix(in oklch, var(--ep-accent-ink) 52%, #fff);
+}
+
+/* 状态胶囊原来靠「半透明白底压色相」保证对比，深色下换成深色半透明底 */
+html.dark .ep-status {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+html.dark .ep-status--done {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+html.dark .ep-status--todo {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+html.dark .ep-status--new {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: var(--ep-accent-text);
 }

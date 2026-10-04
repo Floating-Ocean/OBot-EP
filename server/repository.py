@@ -104,6 +104,10 @@ OPEN_STATUSES = (STATUS_PENDING, STATUS_APPROVED)
 CLOSED_STATUSES = (STATUS_REJECTED, STATUS_APPLIED)
 ALL_STATUSES = (STATUS_PENDING, STATUS_APPROVED, STATUS_CONFLICT, STATUS_REJECTED, STATUS_APPLIED)
 
+# 可选参数的「没传」哨兵：base_value 允许显式传 None（新增类提交本来就没有原值），
+# 所以不能用 None 表示「这次不改它」。
+_UNSET: Any = object()
+
 # ---- 提交类型注册表（由插件在启动时填充）----
 # 框架只存 `type` 字符串，具体有哪些类型、中文名是什么，是插件自己的事。
 # 插件在 `BasePlugin.startup()` 之前（通常在模块导入时）调用 register_submission_types()。
@@ -658,15 +662,20 @@ class Repository:
             counts[str(row["status"])] = int(row["n"])
         return counts
 
-    def count_by_status_for_author(self, author_id: int) -> dict[str, int]:
-        """某个用户自己的提交按状态计数。
+    def count_by_status_for_author(self, author_id: int, *, plugin: str) -> dict[str, int]:
+        """某个用户在**某个工具里**的提交按状态计数。
 
         「我的提交」页面的统计卡必须用这个，否则管理员看到的是全站数字，
         跟普通用户看到的没区别。
+
+        `plugin` 是必填的：提交单表是**所有工具共用**的，少了这个过滤条件，
+        每个工具的「我的提交」都会把自己和别的工具的提交加在一起，
+        页面上就会出现「已生效 12」而本工具其实只有 3 条这种读不懂的数字。
         """
         rows = self._query(
-            "SELECT status, COUNT(*) AS n FROM submissions WHERE author_id = ? GROUP BY status",
-            (author_id,),
+            "SELECT status, COUNT(*) AS n FROM submissions"
+            " WHERE author_id = ? AND plugin = ? GROUP BY status",
+            (author_id, plugin),
         )
         counts = dict.fromkeys(ALL_STATUSES, 0)
         for row in rows:
@@ -757,7 +766,12 @@ class Repository:
         return result
 
     def resolve_submission_conflict(
-        self, submission_id: int, *, keep_new: bool, reviewer_id: int
+        self,
+        submission_id: int,
+        *,
+        keep_new: bool,
+        reviewer_id: int,
+        base_value: Any = _UNSET,
     ) -> Submission:
         row = self._query_one("SELECT status FROM submissions WHERE id = ?", (submission_id,))
         if row is None:
@@ -765,9 +779,46 @@ class Repository:
         if str(row["status"]) != STATUS_CONFLICT:
             raise ConflictError("该提交当前不在冲突状态")
 
-        self.resolve_conflict(submission_id, keep_new=keep_new, reviewer_id=reviewer_id)
+        self.resolve_conflict(
+            submission_id, keep_new=keep_new, reviewer_id=reviewer_id, base_value=base_value
+        )
         result = self._fetch_submission(submission_id)
         assert result is not None
+        return result
+
+    def supersede_submission(
+        self, submission_id: int, *, reviewer_id: int, comment: str
+    ) -> Submission | None:
+        """把一条「已通过待下发」的提交改成「已驳回」（冲突裁定里的交换）。
+
+        只动 approved：它还没写盘，被另一条提交取代时就该驳回，否则它会一直占着
+        「待下发」，下一次下发又被判成冲突。已经 applied 的不动 —— 那条改动确实写过盘，
+        改写它的状态等于篡改审计记录。
+        返回改过的提交；没有命中可改的行时返回 None。
+        """
+        cursor = self._execute(
+            "UPDATE submissions SET status = ?, reviewer_id = ?, review_comment = ?,"
+            " reviewed_at = ? WHERE id = ? AND status = ?",
+            (STATUS_REJECTED, reviewer_id, comment, time.time(), submission_id, STATUS_APPROVED),
+        )
+        if cursor.rowcount <= 0:
+            return None
+        return self._fetch_submission(submission_id)
+
+    def restate_submission(self, submission_id: int, submitted_value: Any) -> Submission:
+        """改写一条提交「要写什么」，状态和时间都不动。
+
+        冲突裁定里管理员确认过的新值可能要先清洗（例如别名被别的类别占用，得先摘掉
+        那几个），清洗结果必须留在提交单上：裁定之后真正写盘的是下一次批量下发，
+        它只看 submitted_value，无从知道裁定里做过什么。
+        """
+        self._execute(
+            "UPDATE submissions SET submitted_value = ? WHERE id = ?",
+            (_dumps(submitted_value), submission_id),
+        )
+        result = self._fetch_submission(submission_id)
+        if result is None:
+            raise KeyError(submission_id)
         return result
 
     def mark_applied(self, submission_id: int, applied_value: Any) -> None:
@@ -778,35 +829,48 @@ class Repository:
         )
 
     def mark_conflict(self, submission_id: int, detail: dict[str, Any]) -> None:
-        """应用时发现原值被改动：把提交单挂到 conflict 状态等待裁定。"""
+        """下发前发现这条改动已经不能直接写盘：挂到 conflict 状态等待裁定。
+
+        两种触发点：审核台体检（过审那一刻就分出同一处的胜负），以及真正写盘时。
+        只对 approved 生效，所以反复调用是幂等的。
+        """
         self._execute(
             "UPDATE submissions SET status = ?, conflict_detail = ?, conflict_at = ?"
             " WHERE id = ? AND status = ?",
             (STATUS_CONFLICT, _dumps(detail), time.time(), submission_id, STATUS_APPROVED),
         )
 
-    def resolve_conflict(self, submission_id: int, *, keep_new: bool, reviewer_id: int) -> None:
+    def refresh_conflict_detail(self, submission_id: int, detail: dict[str, Any]) -> None:
+        """改写一条**已经在 conflict 里**的提交的三方对比。
+
+        对手会换人：裁定保留 #2 时 #1 被驳回、#2 排回待下发，同一处上还挂着的 #3
+        该对照的就是 #2，而不是已经作废的 #1。体检时用它把展示信息拉回现状。
+        状态与时间都不动 —— 回不回「待下发」是管理员裁定的事。
+        """
+        self._execute(
+            "UPDATE submissions SET conflict_detail = ? WHERE id = ? AND status = ?",
+            (_dumps(detail), submission_id, STATUS_CONFLICT),
+        )
+
+    def resolve_conflict(
+        self,
+        submission_id: int,
+        *,
+        keep_new: bool,
+        reviewer_id: int,
+        base_value: Any = _UNSET,
+    ) -> None:
         """裁定冲突。
 
         keep_new=True  -> 改回 approved，下一次应用会覆盖磁盘上的当前值
         keep_new=False -> 丢弃这条提交（rejected），磁盘保持现状
+
+        `base_value` 是裁定后这条提交要改记的「提交时看到的原值」。管理员既然在
+        知情的前提下决定用提交值覆盖磁盘现值，比对基准就该跟着挪到现值上；不挪的话
+        下一次应用会拿旧基准再判一次冲突，裁定永远走不出去。不传则保持原样。
         """
         now = time.time()
-        if keep_new:
-            self._execute(
-                "UPDATE submissions SET status = ?, reviewer_id = ?, reviewed_at = ?,"
-                " conflict_detail = NULL, conflict_at = NULL, review_comment = ?"
-                " WHERE id = ? AND status = ?",
-                (
-                    STATUS_APPROVED,
-                    reviewer_id,
-                    now,
-                    "冲突裁定：保留提交的新值，应用时覆盖磁盘当前值",
-                    submission_id,
-                    STATUS_CONFLICT,
-                ),
-            )
-        else:
+        if not keep_new:
             self._execute(
                 "UPDATE submissions SET status = ?, reviewer_id = ?, reviewed_at = ?,"
                 " conflict_detail = NULL, conflict_at = NULL, review_comment = ?"
@@ -820,6 +884,30 @@ class Repository:
                     STATUS_CONFLICT,
                 ),
             )
+            return
+
+        assignments = [
+            "status = ?",
+            "reviewer_id = ?",
+            "reviewed_at = ?",
+            "conflict_detail = NULL",
+            "conflict_at = NULL",
+            "review_comment = ?",
+        ]
+        params: list[Any] = [
+            STATUS_APPROVED,
+            reviewer_id,
+            now,
+            "冲突裁定：保留提交的新值，已排回「待下发」，下发时覆盖磁盘当前值",
+        ]
+        if base_value is not _UNSET:
+            assignments.append("base_value = ?")
+            params.append(_dumps(base_value))
+        params.extend([submission_id, STATUS_CONFLICT])
+        self._execute(
+            f"UPDATE submissions SET {', '.join(assignments)} WHERE id = ? AND status = ?",
+            params,
+        )
 
     def withdraw_submission(self, submission_id: int) -> None:
         row = self._query_one("SELECT status FROM submissions WHERE id = ?", (submission_id,))

@@ -3,14 +3,22 @@
 浏览接口要给出「磁盘原值 + 审核中的改动」两套信息（原值用于编辑，在途改动只读展示），
 审核后的写入需要按目标合并，这两件事都放在这里，路由层只负责鉴权和参数校验。
 
-冲突从哪来：``parser.json`` / ``config.json`` 是 Bot 也在写的文件。
-一条提交单在「用户提交」和「管理员应用」之间可能被别人（Bot 的 OCR 任务、
-别人的提交）改过。这时直接覆盖就会静默丢掉那次改动，所以流程是：
+冲突有两种，判定入口和裁定流程是同一套：
 
-  1. 应用时逐条比对「提交时看到的原值」与磁盘当前值
-  2. 不一致的提交单转成 ``conflict`` 状态挂起，**不写盘**
-  3. 管理员在「冲突处理」里看到三方对比（原值 / 磁盘现值 / 提交新值）后裁定：
-     保留新值（立即覆盖写入）或丢弃提交（保持磁盘现状）
+  1. **同一个字段被两个人都改了**：只有**最早过审**的那条能下发，其余的转成
+     ``conflict`` 挂起。判断标准是「过审的先后」，不是提交的先后 —— 先审过的那条
+     才是管理员认可的现值。
+  2. **磁盘原值在提交之后被别人改过**（Bot 的 OCR 任务、别人的提交）：比对「提交时
+     看到的原值」与磁盘当前值，不一致的一样挂起。
+
+两种都**不写盘**（体检 ``scan_conflicts`` 与下发共用同一套判定）。管理员在「冲突处理」
+里看到三方对比后裁定：
+
+  - 保留提交的新值 -> **交换**：这条排回「待下发」，被它取代的那条（还在待下发的对手）
+    改成「已驳回」，写盘交给下一次一键下发；同时把这条的比对基准挪到磁盘现值，
+    否则下一次下发会拿旧基准再判一次冲突，裁定永远走不出去。
+    对手已经写盘（applied）的不动它 —— 那条改动确实写过盘，改状态等于篡改记录。
+  - 丢弃提交 -> 直接驳回，磁盘保持现状。
 
 点赞是增量（提交单里存的是「加多少」），加在磁盘现值上就是正确结果，
 所以不存在冲突，也不参与上面的比对。
@@ -21,7 +29,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from server.repository import OPEN_STATUSES, Repository, Submission
+from server.repository import (
+    OPEN_STATUSES,
+    STATUS_APPROVED,
+    STATUS_CONFLICT,
+    Repository,
+    Submission,
+)
 
 from . import config
 from .hashing import new_legacy_entry
@@ -52,6 +66,9 @@ class Conflict:
     current_value: Any = None
     base_value: Any = None
     missing: bool = False
+    # 抢到了同一处的另一条提交（「同字段撞车」时才有）：裁定保留本条时它要被驳回。
+    # 磁盘被 Bot 改动那种冲突没有对手，这里就是 None。
+    rival: Submission | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,11 +81,14 @@ class Conflict:
             "reason": self.reason,
             "missing": self.missing,
             # base_value      提交时看到的原值
-            # current_value   磁盘现在的值
+            # current_value   磁盘现在的值，或者对手将要下发的值
             # submitted_value 用户提交的新值
             "base_value": self.base_value,
             "current_value": self.current_value,
             "submitted_value": self.submission.submitted_value,
+            # 对手是谁：界面据此把「现值」那一栏说成「另一个用户的修改」
+            "rival_id": self.rival.id if self.rival else None,
+            "rival_author_name": self.rival.author_name if self.rival else "",
             "note": self.submission.note,
             "detected_at": self.submission.conflict_at,
         }
@@ -240,6 +260,42 @@ def _same(left: Any, right: Any) -> bool:
     return left == right
 
 
+def conflict_slot(submission: Submission) -> tuple[str, str, str]:
+    """这条提交争的是「哪一处」。
+
+    同一处只容得下一条改动：图片是按 `(类别, 文件名, 字段)` 算的，类别类提交是按
+    `img_key` 整块算的（改 id 与改别名是两条提交单，但落在同一份 config 条目上）。
+    点赞是增量，不参与竞争，调用方自行排除。
+    """
+    return (submission.img_key, submission.target, field_of(submission) or "")
+
+
+def apply_order(submissions: list[Submission]) -> list[Submission]:
+    """下发顺序：**最早过审**的排最前，同一时刻过审的按提交单 id。
+
+    冲突裁定的口径就是「过审早的那条先下发」，所以这里必须按 reviewed_at 排，
+    而不是按提交单 id —— 先提交不等于先被管理员认可。裁定里被排回「待下发」的提交
+    会拿到新的 reviewed_at，于是自然排到队尾。
+    """
+    return sorted(submissions, key=lambda item: (item.reviewed_at or 0.0, item.id))
+
+
+def rival_conflict(submission: Submission, holder: Submission) -> Conflict:
+    """同一处被两个人改过时，后过审那条的冲突。
+
+    `current_value` 放的是**对手将要下发的那个值**（还没写盘），不是磁盘现值 ——
+    对手会换人，所以展示这一格时要用「现在的持有人」，见 `refresh_conflicts`。
+    """
+    return Conflict(
+        submission=submission,
+        reason=f"#{holder.id}（{holder.author_name or '另一位用户'}）"
+        "先过审，改的是同一处；本条下发会盖掉那条",
+        base_value=submission.base_value,
+        current_value=holder.submitted_value,
+        rival=holder,
+    )
+
+
 def image_conflict(store: PickOneStore, submission: Submission) -> Conflict | None:
     """检查一条图片字段提交在磁盘上是否已经被改动过。"""
     name = field_of(submission)
@@ -293,11 +349,19 @@ def category_conflict(store: PickOneStore, submission: Submission) -> Conflict |
 
     if submission.type == TYPE_CATEGORY_CREATE:
         if existing is not None:
+            current = {"id": existing.id, "keys": list(existing.keys)}
+            # 「提交时看到的原值」等于现值，说明这条新增已经被裁定过（管理员确认要用
+            # 它覆盖后建出来的那个类别），不该再判一次冲突 —— 与修改类同一个口径。
+            base = submission.base_value if isinstance(submission.base_value, dict) else None
+            if base is not None and _same(base.get("id"), current["id"]) and _same(
+                base.get("keys"), current["keys"]
+            ):
+                return None
             return Conflict(
                 submission=submission,
                 reason="该类别标识已被占用（可能在申请之后被创建）",
-                base_value=None,
-                current_value={"id": existing.id, "keys": list(existing.keys)},
+                base_value=submission.base_value,
+                current_value=current,
             )
         if twin is not None:
             return Conflict(
@@ -367,6 +431,9 @@ class ApplyPlan:
     # submission_id -> 落盘后应记录的值
     applied_values: dict[int, Any] = field(default_factory=dict)
     conflicts: list[Conflict] = field(default_factory=list)
+    # 冲突槽位 -> 本批真正会下发的那条。刷新别的冲突时用它当「现在的对手」：
+    # 对手是会换人的（裁定把另一条排回了待下发）。
+    holders: dict[tuple[str, str, str], Submission] = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -393,44 +460,37 @@ def build_apply_plan(store: PickOneStore, submissions: list[Submission]) -> Appl
     """把 approved 提交单分成「可以直接写盘」和「有冲突」两组。
 
     同一批里可能有多个人改了同一个字段 / 同一个类别（各自基于当时的原值）。
-    这时只有排在最前面的那条能写盘，后面的转成冲突交给管理员裁定 ——
+    这时只有**最早过审**的那条能写盘，后面的转成冲突交给管理员裁定 ——
     否则先写的那条会被后面的静默覆盖，提交单却还标着「已下发」。
     点赞是增量，叠加起来就是正确结果，不参与这里。
+
+    判定用磁盘现状（而不是「本批已经写进 raw 的样子」）：这一批只写一次盘，
+    每条提交都该按「我过审之后、这批下发之前」的样子判一次。
     """
     plan = ApplyPlan()
-    ordered = sorted(submissions, key=lambda item: item.id)
+    ordered = apply_order(submissions)
 
-    earlier_images: dict[tuple[str, str, str], Submission] = {}
-    earlier_categories: dict[str, Submission] = {}
+    earlier: dict[tuple[str, str, str], Submission] = {}
 
     for submission in ordered:
         name = field_of(submission)
         conflict = detect_conflict(store, submission)
 
         if conflict is None and submission.type != TYPE_LIKES:
-            if name is None:
-                earlier = earlier_categories.get(submission.img_key)
-            else:
-                earlier = earlier_images.get((submission.img_key, submission.target, name))
-            if earlier is not None:
-                conflict = Conflict(
-                    submission=submission,
-                    reason=f"同一次下发里另有一条改动（#{earlier.id}）要写同一个"
-                    + ("字段" if name else "类别")
-                    + "，先写入的那条才是磁盘现值",
-                    base_value=submission.base_value,
-                    current_value=earlier.submitted_value,
-                )
+            holder = earlier.get(conflict_slot(submission))
+            if holder is not None:
+                conflict = rival_conflict(submission, holder)
 
         if conflict is not None:
             plan.conflicts.append(conflict)
             continue
 
+        # 点赞是增量，不占槽位（两条点赞叠加起来本来就是正确结果）
+        if submission.type != TYPE_LIKES:
+            earlier[conflict_slot(submission)] = submission
         if name is None:
-            earlier_categories[submission.img_key] = submission
             continue
 
-        earlier_images[(submission.img_key, submission.target, name)] = submission
         plan.image_changes.setdefault(submission.img_key, []).append(
             {
                 "name": submission.target,
@@ -481,6 +541,7 @@ def build_apply_plan(store: PickOneStore, submissions: list[Submission]) -> Appl
         plan.applied_ids.append(submission.id)
         plan.applied_values[submission.id] = plan.category_entries.get(submission.img_key)
 
+    plan.holders = earlier
     return plan
 
 
@@ -534,6 +595,77 @@ def apply_approved(repo: Repository, store: PickOneStore) -> dict[str, Any]:
     }
 
 
+def scan_conflicts(repo: Repository, store: PickOneStore) -> dict[str, Any]:
+    """体检一遍「已通过待下发」的提交单：挂起新的冲突，并刷新已经挂起的那些。
+
+    为什么需要它：冲突判定平时只在**下发**那一瞬间做，而 `/admin/apply/preview`
+    是只读的（dry-run 不能改状态）。于是「过审之后又有人先改了这一处」这种冲突，
+    在下发之前只出现在预览的提醒里，冲突待裁定表是空的 —— 点「去处理冲突」过去
+    什么也没有。审核台每刷新一次就跑一遍同一套判定（不写数据文件），把结果持久化。
+    反复调用是幂等的：`mark_conflict` 只对 approved 生效，挂起过的不会再动。
+
+    挂起的冲突还要**重新对一遍对手**（`refresh_conflicts`）：裁定保留 #2 时 #1 被
+    驳回、#2 排回待下发，那么同一处上还挂着的 #3 该对照的就是 #2 而不是 #1。
+    """
+    plan = build_apply_plan(store, repo.list_approved_submissions(SLUG))
+    payloads = [conflict.to_dict() for conflict in plan.conflicts]
+    for conflict in plan.conflicts:
+        repo.mark_conflict(conflict.submission.id, conflict.to_dict())
+    return {
+        "conflicts": payloads,
+        "total": len(payloads),
+        "submission_ids": [conflict.submission.id for conflict in plan.conflicts],
+        "refreshed_ids": refresh_conflicts(repo, store, plan.holders),
+    }
+
+
+def refresh_conflicts(
+    repo: Repository, store: PickOneStore, holders: dict[tuple[str, str, str], Submission]
+) -> list[int]:
+    """让已经挂起的冲突重新对上「现在的对手」，返回被改写的提交单 id。
+
+    只改 `conflict_detail`（三方对比），状态一律不动：回不回「待下发」是管理员裁定
+    的事，体检只负责让界面上的对照物跟得上现状。
+    """
+    rows, _ = repo.list_submissions(plugin=SLUG, status=STATUS_CONFLICT, limit=200)
+    refreshed: list[int] = []
+    for row in rows:
+        holder = None if row.type == TYPE_LIKES else holders.get(conflict_slot(row))
+        if holder is None and not (row.conflict_detail or {}).get("rival_id"):
+            # 既没有对手、当初也不是「撞车」那种冲突（磁盘被改 / 图片没了）：
+            # 那是另一套判定，理由由下发时重算，体检不该改写它
+            continue
+        detail = _conflict_now(store, row, holder)
+        if detail is None or detail == row.conflict_detail:
+            continue
+        repo.refresh_conflict_detail(row.id, detail)
+        refreshed.append(row.id)
+    return refreshed
+
+
+def _conflict_now(
+    store: PickOneStore, submission: Submission, holder: Submission | None
+) -> dict[str, Any] | None:
+    """这条冲突现在的对照物：还在待下发的对手，或者磁盘现值。
+
+    对手走了（被驳回 / 撤回）而又没有别人改过磁盘时，也不能留着那条旧的对照物：
+    显示成「现在下发不会盖掉任何东西」，让管理员知道这条其实可以直接采纳。
+    """
+    if holder is not None:
+        return rival_conflict(submission, holder).to_dict()
+
+    disk = detect_conflict(store, submission)
+    if disk is not None:
+        return disk.to_dict()
+
+    return Conflict(
+        submission=submission,
+        reason="原先与它冲突的那条已经不在待下发里了，磁盘上也没有别人改过这一处",
+        base_value=submission.base_value,
+        current_value=_baseline_after_resolve(store, submission),
+    ).to_dict()
+
+
 def resolve_conflict(
     repo: Repository,
     store: PickOneStore,
@@ -542,12 +674,19 @@ def resolve_conflict(
     keep_new: bool,
     reviewer_id: int,
 ) -> dict[str, Any]:
-    """裁定一条冲突：保留新值并立即写入，或丢弃提交保留磁盘现状。
+    """裁定一条冲突：保留提交的新值（排回待下发）或丢弃提交（保持磁盘现状）。
 
-    注意：选择「保留新值」本身就是管理员的裁定 —— 他知道磁盘当前值和提交值不一样，
-    并且决定用提交值覆盖。所以这里**不会**再拿旧的 base_value 去判定冲突，
-    只确认目标仍然存在（图片没被删、类别还在），否则拒绝写入。
-    返回值的 dropped_aliases 会列出因被别的类别占用而没有写入的别名。
+    「保留新值」= 管理员在知情的前提下决定用这个值覆盖磁盘现值，于是做一次**交换**：
+    这条排回「待下发」，还在待下发的对手（同字段早先过审的那条）改成「已驳回」，
+    磁盘等下一次一键下发再动。这里必须把这条的比对基准挪到磁盘现值上，否则下一次
+    下发会拿旧基准再判一次冲突，裁定永远走不出去。
+
+    对手已经写盘（applied）时不动它 —— 那条改动确实写过盘；本条下发时自然覆盖它。
+
+    另外，别名的唯一性是 config.json 的硬约束（同一个别名指向两个类别时 Bot 的
+    match_dict 会随机挑一个）：被别的类别占用的别名会在**这里**摘掉并写回提交单，
+    因为真正写盘的是下一次批量下发，它无从知道这次裁定。返回值的 dropped_aliases
+    会列出摘掉的别名。
     """
     submission = repo.get_submission(submission_id)
     if submission is None:
@@ -557,66 +696,101 @@ def resolve_conflict(
         updated = repo.resolve_submission_conflict(
             submission_id, keep_new=False, reviewer_id=reviewer_id
         )
-        return {"resolved": "discarded", "applied": False, "submission": updated.to_dict()}
+        return {
+            "resolved": "discarded",
+            "applied": False,
+            "superseded": [],
+            "submission": updated.to_dict(),
+        }
 
     _ensure_target_writable(store, submission)
 
+    dropped_aliases: list[str] = []
+    if submission.type in CATEGORY_TYPES:
+        dropped_aliases = _drop_taken_aliases(repo, store, submission)
+
+    superseded = _supersede_rivals(repo, submission, reviewer_id=reviewer_id)
+
     updated = repo.resolve_submission_conflict(
-        submission_id, keep_new=True, reviewer_id=reviewer_id
+        submission_id,
+        keep_new=True,
+        reviewer_id=reviewer_id,
+        base_value=_baseline_after_resolve(store, submission),
     )
 
-    # 单条写入，不再走冲突判定（原因见上面的 docstring）
-    plan = ApplyPlan()
-    dropped_aliases: list[str] = []
-    name = field_of(updated)
-    if name is not None:
-        plan.image_changes[updated.img_key] = [
-            {
-                "name": updated.target,
-                "field": name,
-                "value": updated.submitted_value,
-                "submission_id": updated.id,
-            }
-        ]
-        plan.applied_ids.append(updated.id)
-        plan.applied_values[updated.id] = updated.submitted_value
-    elif updated.type in CATEGORY_TYPES:
-        value = updated.submitted_value if isinstance(updated.submitted_value, dict) else {}
-        current = store.load_categories().get(updated.img_key)
-        if updated.type == TYPE_CATEGORY_CREATE:
-            plan.new_keys.append(updated.img_key)
-        keys = _dedupe(value.get("keys") or (list(current.keys) if current else []))
-        # 管理员是在知情的前提下选择覆盖的，所以这里不再拿 base_value 判定冲突；
-        # 但别名的唯一性是 config.json 的硬约束：同一个别名指向两个类别时，Bot 的
-        # match_dict 会随机挑一个，等于悄悄把别名从另一个类别手里抢走。所以把
-        # 「已被别人占用」的别名摘掉再写，并把结果回给管理员。
-        keys, dropped_aliases = _without_taken_aliases(
-            store, keys, exclude_key=updated.img_key
-        )
-        entry = {
-            "id": value.get("id") or (current.id if current else updated.img_key),
-            "key": keys,
-        }
-        if not entry["key"]:
-            entry["key"] = [entry["id"]]
-        plan.category_entries[updated.img_key] = entry
-        plan.applied_ids.append(updated.id)
-        plan.applied_values[updated.id] = entry
-
-    written = _write_plan(store, plan)
-    for applied_id in plan.applied_ids:
-        repo.mark_applied(applied_id, plan.applied_values.get(applied_id))
-
-    latest = repo.get_submission(submission_id)
     result = {
-        "resolved": "applied",
-        "applied": True,
-        **written,
-        "submission": latest.to_dict() if latest else updated.to_dict(),
+        "resolved": "queued",
+        "applied": False,
+        "superseded": superseded,
+        "submission": updated.to_dict(),
     }
     if dropped_aliases:
         result["dropped_aliases"] = dropped_aliases
     return result
+
+
+def _baseline_after_resolve(store: PickOneStore, submission: Submission) -> Any:
+    """裁定「保留新值」之后，这条提交要比对的「原值」—— 也就是磁盘现值。
+
+    这条提交下一次下发时还会走一遍冲突判定，基准不跟着挪就会永远冲突下去。
+    新增类别在磁盘上还没有那一份时基准是 None（它本来就没有原值）；但如果这个类别
+    已经被别人建出来了（对手先写盘了），基准就是现在这一份 —— 管理员裁定「保留新值」
+    等于确认要覆盖它，类别判定会因此放行（见 category_conflict）。
+    """
+    name = field_of(submission)
+    if name is not None:
+        stat = store.get_image_stat(submission.img_key, submission.target)
+        return list(stat.comments) if name == "comments" else getattr(stat, name)
+
+    existing = store.load_categories().get(submission.img_key)
+    if existing is None:
+        return None
+    return {"id": existing.id, "keys": list(existing.keys)}
+
+
+def _supersede_rivals(
+    repo: Repository, submission: Submission, *, reviewer_id: int
+) -> list[dict[str, Any]]:
+    """把同一处上还排在「待下发」里的其它提交驳回，返回被驳回的那些。
+
+    裁定保留本条，就等于本条取代了它们：它们不会被写盘，再挂着「已通过待下发」只会
+    在下一次下发里又被判成冲突。已经写盘（applied）的不动 —— 见 resolve_conflict。
+    """
+    if submission.type == TYPE_LIKES:
+        return []
+
+    slot = conflict_slot(submission)
+    rows, _ = repo.list_submissions(plugin=SLUG, status=STATUS_APPROVED, limit=200)
+    superseded: list[dict[str, Any]] = []
+    for row in rows:
+        if row.id == submission.id or conflict_slot(row) != slot:
+            continue
+        comment = f"冲突裁定：被 #{submission.id} 取代，未下发"
+        updated = repo.supersede_submission(row.id, reviewer_id=reviewer_id, comment=comment)
+        if updated is None:
+            continue
+        superseded.append(
+            {"submission_id": updated.id, "author_name": updated.author_name}
+        )
+    return superseded
+
+
+def _drop_taken_aliases(repo: Repository, store: PickOneStore, submission: Submission) -> list[str]:
+    """把被别的类别占用的别名从这条提交里摘掉（并写回提交单），返回摘掉的那些。"""
+    value = submission.submitted_value if isinstance(submission.submitted_value, dict) else {}
+    keys = _dedupe([str(item) for item in (value.get("keys") or [])])
+    if not keys:
+        return []
+
+    current = store.load_categories().get(submission.img_key)
+    kept, dropped = _without_taken_aliases(store, keys, exclude_key=submission.img_key)
+    if not dropped:
+        return []
+    if not kept:
+        # 别名全被占走了：至少留下类别标识本身，别写出一个没有 key 的条目
+        kept = [str(value.get("id") or (current.id if current else submission.img_key))]
+    repo.restate_submission(submission.id, {**value, "keys": kept})
+    return dropped
 
 
 def _without_taken_aliases(

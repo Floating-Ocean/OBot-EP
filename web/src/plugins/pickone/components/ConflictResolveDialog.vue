@@ -32,6 +32,15 @@ const reason = computed(
   () => openConflict.value?.reason ?? detail.value?.reason ?? '原值已被改动',
 )
 
+/** 对手：同一个字段上更早过审、现在排在「待下发」里的那条（没有就是被 Bot 改过） */
+const rivalId = computed(() => openConflict.value?.rival_id ?? null)
+
+const currentLabel = computed(() =>
+  rivalId.value
+    ? `另一条待下发的修改（#${rivalId.value} · ${openConflict.value?.rival_author_name || '另一位用户'}）`
+    : '磁盘当前值（可能已被 Bot 改动）',
+)
+
 /** 展开成逐字段的三方对比：提交时原值 / 磁盘现值 / 提交的新值 */
 const rows = computed(() => {
   const conflict = openConflict.value
@@ -78,12 +87,10 @@ async function resolve(keepNew) {
   if (!openConflict.value) return
   submitting.value = keepNew ? 'keep' : 'discard'
   try {
-    const result = await api.resolveConflict(openConflict.value.submission_id, keepNew)
-    ElMessage.success(
-      result.applied
-        ? '已保留提交的新值并写入 OBot-ACM'
-        : '已丢弃该提交，磁盘保持当前值',
-    )
+    // 用命名空间写法：resolveConflict 两个插件都有，平铺的 api.resolveConflict 会被
+    // 门面撤掉（见 web/src/api/index.js 的重名规则）
+    const result = await api.pickone.resolveConflict(openConflict.value.submission_id, keepNew)
+    ElMessage.success(resolveMessage(result, keepNew))
     visible.value = false
     emit('resolved', result)
   } catch (error) {
@@ -92,18 +99,28 @@ async function resolve(keepNew) {
     submitting.value = null
   }
 }
+
+/**
+ * 裁定结果的提示文案。
+ *
+ * 「保留新值」不再立刻写盘，而是一次**交换**：这条排回「待下发」，被它取代的那条
+ * （还在待下发的对手）改成「已驳回」，真正写盘交给下一次一键下发。
+ */
+function resolveMessage(result, keepNew) {
+  if (!keepNew) return '已丢弃该提交，磁盘保持当前值'
+  const superseded = (result.superseded ?? []).map((item) => `#${item.submission_id}`)
+  const tail = superseded.length
+    ? `，${superseded.join('、')} 已驳回`
+    : ''
+  return `已裁定：本条进入「待下发」${tail}。点「一键下发」写入 OBot-ACM。`
+}
 </script>
 
 <template>
   <el-dialog v-model="visible" title="冲突处理" width="720px" align-center>
     <template v-if="openConflict">
       <el-alert type="error" :closable="false" show-icon class="mb-14" :title="reason">
-        <div class="text-small">
-          这条提交通过审核后，磁盘上的原值又被人（很可能是 Bot 自己的任务）改过了。
-          直接覆盖会丢掉那次改动，所以需要你确认保留哪一边。
-        </div>
       </el-alert>
-
       <el-descriptions :column="2" size="small" border class="mb-14">
         <el-descriptions-item label="提交 ID">
           #{{ openConflict.submission_id }}
@@ -139,7 +156,7 @@ async function resolve(keepNew) {
           </template>
         </el-table-column>
 
-        <el-table-column label="磁盘当前值（可能已被 Bot 改动）" min-width="180" show-overflow-tooltip>
+        <el-table-column :label="currentLabel" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="diff-value" :class="{ 'is-current': isChanged(row) }">
               {{ renderValue(row.current) }}
@@ -165,8 +182,8 @@ async function resolve(keepNew) {
             <el-icon><Select /></el-icon> 保留提交的新值
           </div>
           <div class="choice-desc text-small text-muted">
-            用「提交的新值」覆盖磁盘当前值，并立即写入 OBot-ACM。
-            仅在你确认提交内容比 Bot 的改动更准确时选择。
+            本条提交进入待下发流程，另一条提交将被驳回。
+            仅在你确认提交内容比其他人的改动更准确时选择。
           </div>
           <el-button
             type="primary"
@@ -174,7 +191,7 @@ async function resolve(keepNew) {
             :loading="submitting === 'keep'"
             @click.stop="resolve(true)"
           >
-            覆盖写入
+            采用这条修改
           </el-button>
         </el-card>
 
@@ -183,7 +200,7 @@ async function resolve(keepNew) {
             <el-icon><CloseBold /></el-icon> 丢弃这条提交
           </div>
           <div class="choice-desc text-small text-muted">
-            不写入任何东西，磁盘保持「磁盘当前值」。提交单会记为已驳回，
+            本条提交将被驳回，
             提交者可以在浏览页看到最新值后重新提交。
           </div>
           <el-button

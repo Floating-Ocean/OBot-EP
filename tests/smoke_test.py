@@ -4,7 +4,7 @@ To avoid depending on write permissions outside the sandbox and to leave real
 data untouched, this generates a Pick-One directory structure on the fly
 (config.json / parser.json / *.gif) as a fixture, then points
 `OBOT_PICK_ONE_DIR` at it to run the full "submit -> review -> one-click apply"
-flow.
+flow. The contestlist half does the same with a `manual_contests.json` fixture.
 
 Run: .venv\\Scripts\\python.exe tests\\smoke_test.py
 """
@@ -24,11 +24,14 @@ sys.path.insert(0, str(ROOT))
 TMP_ROOT = ROOT / ".tmp"
 FIXTURE = TMP_ROOT / "pick-one-fixture"
 DATA_DIR = TMP_ROOT / "smoke-data"
+CONTEST_FIXTURE = TMP_ROOT / "contestlist-fixture"
 
 os.environ["OBOT_PICK_ONE_DIR"] = str(FIXTURE)
 os.environ["OBOT_EP_DATA_DIR"] = str(DATA_DIR)
 os.environ["OBOT_EP_ADMIN_PASSWORD"] = "admin12345"
 os.environ["OBOT_EP_SECRET"] = "smoke-test-secret"
+# Contestlist 的比赛列表：默认指向 OBot-ACM 的安装目录，测试里换成自己的 fixture
+os.environ["OBOT_CONTESTLIST_PATH"] = str(CONTEST_FIXTURE / "manual_contests.json")
 # TestClient 不监听任何端口，但不设这一项时应用会按「正在对网络提供服务」处理，
 # 每个 TestClient(app) 都会打一整块明文 HTTP / 开放注册的告警，把输出淹掉
 os.environ["OBOT_EP_BIND_HOST"] = "127.0.0.1"
@@ -42,6 +45,9 @@ PASSED: list[str] = []
 FAILED: list[str] = []
 
 NEW_CATEGORY = "smoke_test_cat"
+
+# 比赛条目的六个可编辑字段（与 plugins/contestlist/types.py 的 FIELD_ORDER 一致）
+CONTEST_FIELDS = ("platform", "abbr", "name", "start_time", "duration", "supplement")
 
 # Fixed MD5 values (32 hex chars), matching the Bot's naming rule
 MD5S = [
@@ -121,14 +127,74 @@ def build_fixture() -> None:
     )
 
 
+def build_contest_fixture() -> None:
+    """Build a minimal `manual_contests.json` (the file the Bot also writes)."""
+    shutil.rmtree(CONTEST_FIXTURE, ignore_errors=True)
+    CONTEST_FIXTURE.mkdir(parents=True)
+    contests = [
+        {
+            "platform": "ICPC",
+            "abbr": "济南",
+            "name": "2025 ICPC 济南区域赛",
+            "start_time": 1760000000,
+            "duration": 18000,
+            "supplement": "线下",
+        },
+        {
+            "platform": "CCPC",
+            "abbr": "桂林",
+            "name": "2025 CCPC 桂林站",
+            "start_time": 1765000000,
+            "duration": 18000,
+            "supplement": "线上",
+        },
+        {
+            "platform": "AtCoder",
+            "abbr": "ABC300",
+            "name": "AtCoder Beginner Contest 300",
+            "start_time": 1770000000,
+            "duration": 6000,
+            "supplement": "",
+        },
+    ]
+    (CONTEST_FIXTURE / "manual_contests.json").write_text(
+        json.dumps(contests, ensure_ascii=False, indent=4), encoding="utf-8"
+    )
+
+
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
+def ocr_text_of(parser: dict, name: str) -> str:
+    """parser.json 里一张图的描述文字：老条目直接是字符串，新条目是 {ocr_text: ...}。"""
+    entry = parser[name]
+    return entry if isinstance(entry, str) else entry["ocr_text"]
+
+
+def contest_by_abbr(client, abbr: str) -> dict:
+    """按简称取一场比赛（提交时要带上整条字段，所以先读出来）。"""
+    items = client.get("/api/plugins/contestlist/items").json()["items"]
+    return next(item for item in items if item["abbr"] == abbr)
+
+
+def contest_payload(item: dict, **changes) -> dict:
+    """一条比赛的完整字段，改掉其中几个。
+
+    修改接口收的是**整条**比赛（后端按字段逐个比对算出改了哪些），所以不能只发
+    要改的那一格，其余字段必须原样带上。
+    """
+    fields = {name: item[name] for name in CONTEST_FIELDS}
+    fields.update(changes)
+    return {"contest": fields}
+
+
 def main() -> int:
     build_fixture()
+    build_contest_fixture()
     config_path = FIXTURE / "config.json"
     parser_path = FIXTURE / "lzh" / "parser.json"
+    contests_path = CONTEST_FIXTURE / "manual_contests.json"
     config_before = config_path.read_text(encoding="utf-8")
     parser_before = parser_path.read_text(encoding="utf-8")
 
@@ -136,7 +202,8 @@ def main() -> int:
         admin_client = TestClient(app)
         alice = TestClient(app)
         bob = TestClient(app)
-        with admin_client, alice, bob:
+        carol = TestClient(app)
+        with admin_client, alice, bob, carol:
             print("\n== Auth ==")
             r = admin_client.post(
                 "/api/auth/login", json={"username": "admin", "password": "admin12345"}
@@ -645,7 +712,8 @@ def main() -> int:
             check("Resolve by discarding", r.status_code == 200 and r.json()["resolved"] == "discarded", r.text[:200])
             check("Disk keeps the bot value", read_json(parser_path)[name]["ocr_text"] == "BOT-REWROTE")
 
-            # Resolution, option B: keep the submitted value and overwrite the disk
+            # Resolution, option B: keep the submitted value -> it goes back to the
+            # dispatch queue and the actual write happens on the next one-click apply
             r = alice.post(
                 "/api/plugins/pickone/submissions",
                 params={"img_key": "lzh", "type": "ocr_text"},
@@ -660,16 +728,32 @@ def main() -> int:
             )
             admin_client.post("/api/plugins/pickone/admin/apply", json={})
             r = admin_client.post(f"/api/plugins/pickone/admin/conflicts/{keep_id}/resolve", json={"keep_new": True})
-            check("Resolve by keeping the new value", r.status_code == 200 and r.json()["applied"] is True, r.text[:200])
+            check(
+                "Resolve by keeping the new value queues it for dispatch",
+                r.status_code == 200 and r.json()["resolved"] == "queued",
+                r.text[:200],
+            )
+            check(
+                "Nothing is written before the one-click apply",
+                read_json(parser_path)[name]["ocr_text"] == "BOT-SECOND",
+                str(read_json(parser_path)[name]),
+            )
+            check(
+                "The resolved submission is back in the approved queue",
+                admin_client.get("/api/admin/queue", params={"status": "approved"}).json()["total"] == 1,
+            )
+            check(
+                "Conflict queue drained",
+                admin_client.get("/api/admin/queue", params={"status": "conflict"}).json()["total"] == 0,
+            )
+
+            r = admin_client.post("/api/plugins/pickone/admin/apply", json={})
+            check("One-click apply writes it", r.json()["submissions"] == 1, json.dumps(r.json(), ensure_ascii=False))
             check("Disk overwritten with the submitted value", read_json(parser_path)[name]["ocr_text"] == "user-final")
             check(
                 "Entry structure still intact",
                 set(read_json(parser_path)[name])
                 >= {"ocr_text", "add_time", "likes", "comments", "pickup_times"},
-            )
-            check(
-                "Conflict queue drained",
-                admin_client.get("/api/admin/queue", params={"status": "conflict"}).json()["total"] == 0,
             )
 
             print("\n== Conflict via category edit ==")
@@ -694,10 +778,17 @@ def main() -> int:
             r = admin_client.post(
                 f"/api/plugins/pickone/admin/conflicts/{category_conflict_id}/resolve", json={"keep_new": True}
             )
-            check("Category conflict resolved", r.status_code == 200, r.text[:200])
+            check(
+                "Category conflict resolved into the dispatch queue",
+                r.status_code == 200 and r.json()["resolved"] == "queued",
+                r.text[:200],
+            )
+            check("config.json still untouched", read_json(config_path)["lzh"]["id"] == "CHANGED-BY-BOT")
+
+            admin_client.post("/api/plugins/pickone/admin/apply", json={})
             config_after_resolve = read_json(config_path)
             check(
-                "Category overwritten by resolution",
+                "Category overwritten by the next apply",
                 config_after_resolve["lzh"]["id"] == "LZH-renamed"
                 and "lzh-alias" in config_after_resolve["lzh"]["key"],
                 json.dumps(config_after_resolve["lzh"], ensure_ascii=False),
@@ -802,6 +893,201 @@ def main() -> int:
                 f"/api/plugins/pickone/admin/conflicts/{admin_cat_id}/resolve", json={"keep_new": False}
             )
 
+            print("\n== Same field: resolving swaps the two submissions ==")
+            # 两个人改同一个字段，审核台体检（也就是过审那一刻）就该分出胜负：
+            # 最早过审的留在「待下发」，另一条进「冲突待裁定」，磁盘谁都还没动。
+            swap_name = f"{MD5S[3]}.gif"
+            swap_before = read_json(parser_path)[swap_name]["ocr_text"]
+
+            r = alice.post(
+                "/api/plugins/pickone/submissions",
+                params={"img_key": "lzh", "type": "ocr_text"},
+                json={"name": swap_name, "ocr_text": "alice-wins-first"},
+            )
+            alice_swap_id = r.json()["submission"]["id"]
+            r = admin_client.post(
+                "/api/plugins/pickone/submissions",
+                params={"img_key": "lzh", "type": "ocr_text"},
+                json={"name": swap_name, "ocr_text": "admin-wins-after"},
+            )
+            admin_swap_id = r.json()["submission"]["id"]
+
+            # 过审顺序决定谁是「可下发」的那条：先过审 Alice 的
+            admin_client.post(f"/api/admin/review/{alice_swap_id}", json={"approve": True})
+            admin_client.post(f"/api/admin/review/{admin_swap_id}", json={"approve": True})
+            r = admin_client.post("/api/plugins/pickone/admin/conflicts/scan")
+            check(
+                "The later approval is held as a conflict before any apply",
+                r.json()["submission_ids"] == [admin_swap_id],
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+            check("Scanning writes nothing to disk", read_json(parser_path)[swap_name]["ocr_text"] == swap_before)
+
+            r = admin_client.get("/api/plugins/pickone/admin/conflicts")
+            conflict_item = r.json()["items"][0]
+            check(
+                "The conflict says who the rival is",
+                conflict_item["conflict_detail"]["rival_id"] == alice_swap_id
+                and conflict_item["conflict_detail"]["current_value"] == "alice-wins-first",
+                json.dumps(conflict_item["conflict_detail"], ensure_ascii=False),
+            )
+
+            # 裁定用 admin 的修改 -> 交换：这条回待下发，Alice 那条驳回，磁盘仍未动
+            r = admin_client.post(
+                f"/api/plugins/pickone/admin/conflicts/{admin_swap_id}/resolve", json={"keep_new": True}
+            )
+            body = r.json()
+            check(
+                "Resolving swaps the two submissions",
+                body["resolved"] == "queued"
+                and [item["submission_id"] for item in body["superseded"]] == [alice_swap_id],
+                json.dumps(body, ensure_ascii=False),
+            )
+            check("Still nothing written to disk", read_json(parser_path)[swap_name]["ocr_text"] == swap_before)
+            queue = admin_client.get("/api/admin/queue", params={"status": "approved"}).json()
+            check(
+                "Only the chosen one is left to dispatch",
+                [item["id"] for item in queue["items"]] == [admin_swap_id],
+                json.dumps(queue["items"], ensure_ascii=False),
+            )
+            r = admin_client.get("/api/admin/queue", params={"status": "rejected"})
+            superseded_row = next(
+                (item for item in r.json()["items"] if item["id"] == alice_swap_id), None
+            )
+            check(
+                "The superseded submission is rejected",
+                superseded_row is not None and f"#{admin_swap_id}" in superseded_row["review_comment"],
+                json.dumps(superseded_row, ensure_ascii=False),
+            )
+
+            admin_client.post("/api/plugins/pickone/admin/apply", json={})
+            check(
+                "The chosen value is the one that lands",
+                read_json(parser_path)[swap_name]["ocr_text"] == "admin-wins-after",
+                str(read_json(parser_path)[swap_name]),
+            )
+
+            print("\n== Same field: three users, two resolutions ==")
+            # 三个人改同一个字段：只有最早过审的那条能下发；每采纳一条，就把它取代的
+            # 那条驳回，并让还挂着的冲突对上「现在的对手」。
+            r = carol.post(
+                "/api/auth/register",
+                json={"username": "carol", "password": "carol12345", "display_name": "Carol"},
+            )
+            check("A third author registers", r.status_code == 201, r.text[:200])
+
+            three_name = f"{MD5S[6]}.gif"
+            three_before = ocr_text_of(read_json(parser_path), three_name)
+            authors = [alice, admin_client, carol]
+            three_ids = []
+            for index, author in enumerate(authors, start=1):
+                r = author.post(
+                    "/api/plugins/pickone/submissions",
+                    params={"img_key": "lzh", "type": "ocr_text"},
+                    json={"name": three_name, "ocr_text": f"version-{index}"},
+                )
+                three_ids.append(r.json()["submission"]["id"])
+
+            for submission_id in three_ids:
+                admin_client.post(f"/api/admin/review/{submission_id}", json={"approve": True})
+            admin_client.post("/api/plugins/pickone/admin/conflicts/scan")
+
+            queue = admin_client.get("/api/admin/queue", params={"status": "approved"}).json()
+            check(
+                "Only the earliest approval stays dispatchable",
+                [item["id"] for item in queue["items"]] == [three_ids[0]],
+                json.dumps(queue["items"], ensure_ascii=False),
+            )
+            conflicts = admin_client.get("/api/plugins/pickone/admin/conflicts").json()["items"]
+            detail_by_id = {item["id"]: item["conflict_detail"] for item in conflicts}
+            check(
+                "Both later edits are held, and both point at the first one",
+                [item["id"] for item in conflicts] == [three_ids[2], three_ids[1]]
+                and detail_by_id[three_ids[1]]["rival_id"] == three_ids[0]
+                and detail_by_id[three_ids[2]]["rival_id"] == three_ids[0]
+                and detail_by_id[three_ids[1]]["current_value"] == "version-1"
+                and detail_by_id[three_ids[1]]["base_value"] == three_before,
+                json.dumps(detail_by_id, ensure_ascii=False),
+            )
+
+            # 采纳第二个：#1 驳回、#2 排回待下发
+            r = admin_client.post(
+                f"/api/plugins/pickone/admin/conflicts/{three_ids[1]}/resolve",
+                json={"keep_new": True},
+            )
+            check(
+                "Adopting the second one rejects the first",
+                [item["submission_id"] for item in r.json()["superseded"]] == [three_ids[0]],
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+
+            # 审核台每次刷新都会体检：这时第三个的对手应该换成第二个
+            admin_client.post("/api/plugins/pickone/admin/conflicts/scan")
+            conflicts = admin_client.get("/api/plugins/pickone/admin/conflicts").json()["items"]
+            check(
+                "The remaining conflict now compares against the second one",
+                [item["id"] for item in conflicts] == [three_ids[2]]
+                and conflicts[0]["conflict_detail"]["rival_id"] == three_ids[1]
+                and conflicts[0]["conflict_detail"]["current_value"] == "version-2"
+                and conflicts[0]["conflict_detail"]["base_value"] == three_before,
+                json.dumps(conflicts, ensure_ascii=False),
+            )
+
+            # 对手被撤回审核（退回待审核）之后，冲突不该再指着一个不在待下发里的提交
+            admin_client.post(f"/api/admin/unreview/{three_ids[1]}")
+            admin_client.post("/api/plugins/pickone/admin/conflicts/scan")
+            detail = admin_client.get("/api/plugins/pickone/admin/conflicts").json()["items"][0][
+                "conflict_detail"
+            ]
+            check(
+                "A conflict stops pointing at a submission that left the queue",
+                detail["rival_id"] is None
+                and detail["current_value"] == three_before
+                and "不在待下发" in detail["reason"],
+                json.dumps(detail, ensure_ascii=False),
+            )
+            # 放回待下发，继续走裁定
+            admin_client.post(f"/api/admin/review/{three_ids[1]}", json={"approve": True})
+            admin_client.post("/api/plugins/pickone/admin/conflicts/scan")
+
+            # 采纳第三个：#2 驳回、#3 排回待下发
+            r = admin_client.post(
+                f"/api/plugins/pickone/admin/conflicts/{three_ids[2]}/resolve",
+                json={"keep_new": True},
+            )
+            check(
+                "Adopting the third one rejects the second",
+                [item["submission_id"] for item in r.json()["superseded"]] == [three_ids[1]],
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+            check(
+                "Disk is still untouched before the dispatch",
+                ocr_text_of(read_json(parser_path), three_name) == three_before,
+            )
+
+            admin_client.post("/api/plugins/pickone/admin/apply", json={})
+            check(
+                "The last adopted value is the one that lands",
+                ocr_text_of(read_json(parser_path), three_name) == "version-3",
+                json.dumps(read_json(parser_path)[three_name], ensure_ascii=False),
+            )
+            statuses = {
+                item["id"]: item["status"]
+                for item in admin_client.get("/api/admin/queue", params={"status": "all"}).json()[
+                    "items"
+                ]
+            }
+            check(
+                "The losers are rejected and the winner is dispatched",
+                [
+                    statuses.get(three_ids[0]),
+                    statuses.get(three_ids[1]),
+                    statuses.get(three_ids[2]),
+                ]
+                == ["rejected", "rejected", "applied"],
+                json.dumps({str(key): value for key, value in statuses.items()}, ensure_ascii=False),
+            )
+
             print("\n== Withdraw ==")
             r = alice.post(
                 "/api/plugins/pickone/submissions",
@@ -815,10 +1101,227 @@ def main() -> int:
             r = alice.delete(f"/api/plugins/pickone/submissions/{conflict_id}")
             check("Withdrawing a reviewed submission rejected", r.status_code in (400, 403), str(r.status_code))
 
+            print("\n== Contestlist: the same field, one dispatch ==")
+            # 两个人改了同一场比赛的同一个字段：只有**最早过审**的那条能下发，
+            # 另一条进冲突待裁定；过审顺序说了算，不是提交顺序。
+            jinan = contest_by_abbr(admin_client, "济南")
+            r = alice.post(
+                "/api/plugins/contestlist/submissions/update",
+                json={"hash": jinan["hash"], **contest_payload(jinan, duration=20000)},
+            )
+            alice_duration_id = r.json()["submission"]["id"]
+            r = admin_client.post(
+                "/api/plugins/contestlist/submissions/update",
+                json={"hash": jinan["hash"], **contest_payload(jinan, duration=25000)},
+            )
+            admin_duration_id = r.json()["submission"]["id"]
+            check(
+                "The two edits are separate submissions",
+                admin_duration_id > alice_duration_id,
+                f"{alice_duration_id} / {admin_duration_id}",
+            )
+
+            # 后提交的那条先过审 —— 它才是「最早过审」的那条
+            admin_client.post(f"/api/admin/review/{admin_duration_id}", json={"approve": True})
+            admin_client.post(f"/api/admin/review/{alice_duration_id}", json={"approve": True})
+            r = admin_client.post("/api/plugins/contestlist/admin/conflicts/scan")
+            check(
+                "The earliest approval wins, not the earliest submission",
+                r.json()["submission_ids"] == [alice_duration_id],
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+            check(
+                "The scan writes nothing to the contest file",
+                read_json(contests_path)[0]["duration"] == 18000,
+                json.dumps(read_json(contests_path)[0], ensure_ascii=False),
+            )
+
+            r = admin_client.get("/api/plugins/contestlist/queue", params={"status": "conflict"})
+            conflict_row = r.json()["items"][0]
+            check(
+                "The conflict row carries the three-way comparison",
+                conflict_row["conflict_detail"]["rival_id"] == admin_duration_id
+                and conflict_row["conflict_detail"]["current_value"]["duration"] == 25000
+                and conflict_row["conflict_detail"]["base_value"]["duration"] == 18000,
+                json.dumps(conflict_row.get("conflict_detail"), ensure_ascii=False),
+            )
+
+            # 裁定用 Alice 的修改：交换 —— Alice 那条回待下发，admin 那条驳回
+            r = admin_client.post(
+                f"/api/plugins/contestlist/admin/conflicts/{alice_duration_id}/resolve",
+                json={"keep_new": True},
+            )
+            body = r.json()
+            check(
+                "Resolving swaps the two submissions",
+                body["resolved"] == "queued"
+                and [item["submission_id"] for item in body["superseded"]] == [admin_duration_id],
+                json.dumps(body, ensure_ascii=False),
+            )
+            check(
+                "Still nothing written before the dispatch",
+                read_json(contests_path)[0]["duration"] == 18000,
+            )
+            admin_client.post("/api/plugins/contestlist/admin/apply", json={})
+            check(
+                "The chosen duration is the one that lands",
+                read_json(contests_path)[0]["duration"] == 20000,
+                json.dumps(read_json(contests_path)[0], ensure_ascii=False),
+            )
+
+            print("\n== Contestlist: renaming and editing in one dispatch ==")
+            # 改「平台 / 名称 / 开始时间」会换掉身份哈希，但一批是一起下发的：
+            # 同一批里后面的提交跟着改名走，不判冲突。
+            jinan = contest_by_abbr(admin_client, "济南")
+            r = alice.post(
+                "/api/plugins/contestlist/submissions/update",
+                json={
+                    "hash": jinan["hash"],
+                    **contest_payload(jinan, name="2025 ICPC 济南区域赛（改）"),
+                },
+            )
+            rename_id = r.json()["submission"]["id"]
+            r = admin_client.post(
+                "/api/plugins/contestlist/submissions/update",
+                json={"hash": jinan["hash"], **contest_payload(jinan, supplement="线上")},
+            )
+            supplement_id = r.json()["submission"]["id"]
+
+            # 改名先过审：它先写，后面的提交要跟着新哈希走
+            admin_client.post(f"/api/admin/review/{rename_id}", json={"approve": True})
+            admin_client.post(f"/api/admin/review/{supplement_id}", json={"approve": True})
+            r = admin_client.post("/api/plugins/contestlist/admin/apply", json={})
+            check(
+                "A rename in the same batch does not conflict the other edit",
+                r.json()["conflicts"] == [] and r.json()["applied"] == 2,
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+            renamed = read_json(contests_path)[0]
+            check(
+                "Both the rename and the other field landed",
+                renamed["name"] == "2025 ICPC 济南区域赛（改）" and renamed["supplement"] == "线上",
+                json.dumps(renamed, ensure_ascii=False),
+            )
+
+            print("\n== Contestlist: three users on the same field ==")
+            # 和 PickOne 同一套规则：最早过审的留在待下发；采纳谁，谁就上去，被它取代
+            # 的那条驳回，还挂着的冲突跟着换成「现在的对手」。
+            jinan = contest_by_abbr(admin_client, "济南")
+            three_contest_ids = []
+            for author, duration in ((alice, 21000), (admin_client, 22000), (carol, 23000)):
+                r = author.post(
+                    "/api/plugins/contestlist/submissions/update",
+                    json={"hash": jinan["hash"], **contest_payload(jinan, duration=duration)},
+                )
+                three_contest_ids.append(r.json()["submission"]["id"])
+
+            for submission_id in three_contest_ids:
+                admin_client.post(f"/api/admin/review/{submission_id}", json={"approve": True})
+            admin_client.post("/api/plugins/contestlist/admin/conflicts/scan")
+            rows = admin_client.get(
+                "/api/plugins/contestlist/queue", params={"status": "conflict"}
+            ).json()["items"]
+            check(
+                "Both later edits are held, both pointing at the first one",
+                [item["id"] for item in rows] == [three_contest_ids[2], three_contest_ids[1]]
+                and all(item["conflict_detail"]["rival_id"] == three_contest_ids[0] for item in rows)
+                # 裁定弹窗按字段名从 current_value 里取那一格，所以它必须是「整条比赛」
+                and all(
+                    set(item["conflict_detail"]["current_value"]) >= set(CONTEST_FIELDS)
+                    for item in rows
+                )
+                and rows[0]["conflict_detail"]["current_value"]["duration"] == 21000,
+                json.dumps(rows, ensure_ascii=False),
+            )
+
+            r = admin_client.post(
+                f"/api/plugins/contestlist/admin/conflicts/{three_contest_ids[1]}/resolve",
+                json={"keep_new": True},
+            )
+            check(
+                "Adopting the second one rejects the first",
+                [item["submission_id"] for item in r.json()["superseded"]]
+                == [three_contest_ids[0]],
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+            admin_client.post("/api/plugins/contestlist/admin/conflicts/scan")
+            rows = admin_client.get(
+                "/api/plugins/contestlist/queue", params={"status": "conflict"}
+            ).json()["items"]
+            check(
+                "The remaining conflict now compares against the second one",
+                [item["id"] for item in rows] == [three_contest_ids[2]]
+                and rows[0]["conflict_detail"]["rival_id"] == three_contest_ids[1]
+                and rows[0]["conflict_detail"]["current_value"]["duration"] == 22000,
+                json.dumps(rows, ensure_ascii=False),
+            )
+
+            r = admin_client.post(
+                f"/api/plugins/contestlist/admin/conflicts/{three_contest_ids[2]}/resolve",
+                json={"keep_new": True},
+            )
+            check(
+                "Adopting the third one rejects the second",
+                [item["submission_id"] for item in r.json()["superseded"]]
+                == [three_contest_ids[1]],
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+            admin_client.post("/api/plugins/contestlist/admin/apply", json={})
+            check(
+                "The last adopted value is the one that lands",
+                read_json(contests_path)[0]["duration"] == 23000,
+                json.dumps(read_json(contests_path)[0], ensure_ascii=False),
+            )
+
+            print("\n== Contestlist: deletes are conflict-free ==")
+            # 删除只有管理员能提（他本人就是下发的人），所以不参与「谁改了同一处」的
+            # 竞争：目标还在就删掉，目标已经不在了就是目的达成。
+            atcoder = contest_by_abbr(admin_client, "ABC300")
+            r = admin_client.post(
+                "/api/plugins/contestlist/admin/delete", json={"hash": atcoder["hash"]}
+            )
+            delete_id = r.json()["submission"]["id"]
+            admin_client.post(f"/api/admin/review/{delete_id}", json={"approve": True})
+            r = admin_client.post("/api/plugins/contestlist/admin/apply", json={})
+            check(
+                "An approved delete removes the contest",
+                r.json()["conflicts"] == []
+                and r.json()["deleted"] == 1
+                and all(item["abbr"] != "ABC300" for item in read_json(contests_path)),
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+
+            guilin = contest_by_abbr(admin_client, "桂林")
+            r = admin_client.post(
+                "/api/plugins/contestlist/admin/delete", json={"hash": guilin["hash"]}
+            )
+            gone_delete_id = r.json()["submission"]["id"]
+            admin_client.post(f"/api/admin/review/{gone_delete_id}", json={"approve": True})
+            # 模拟「另一个批次（或 Bot）先把它删掉了」
+            remaining = [item for item in read_json(contests_path) if item["abbr"] != "桂林"]
+            contests_path.write_text(
+                json.dumps(remaining, ensure_ascii=False, indent=4), encoding="utf-8"
+            )
+            r = admin_client.post("/api/plugins/contestlist/admin/apply", json={})
+            check(
+                "A delete whose target is already gone is not a conflict",
+                r.json()["conflicts"] == [] and r.json()["deleted"] == 1,
+                json.dumps(r.json(), ensure_ascii=False),
+            )
+            statuses = admin_client.get(
+                "/api/plugins/contestlist/queue", params={"status": "applied"}
+            ).json()["items"]
+            check(
+                "It is recorded as dispatched",
+                any(item["id"] == gone_delete_id for item in statuses),
+                json.dumps(statuses, ensure_ascii=False),
+            )
+
             print("\n== Accounts and admin ==")
             r = admin_client.get("/api/admin/users")
             users = r.json()["users"]
-            check("Account list", r.status_code == 200 and len(users) == 2, r.text[:200])
+            # admin + alice + carol（carol 是「三个人改同一处」那段注册的）
+            check("Account list", r.status_code == 200 and len(users) == 3, r.text[:200])
             alice_id = next(item["id"] for item in users if item["username"] == "alice")
             admin_id = next(item["id"] for item in users if item["username"] == "admin")
 
@@ -900,6 +1403,7 @@ def main() -> int:
         config_path.write_text(config_before, encoding="utf-8")
         parser_path.write_text(parser_before, encoding="utf-8")
         shutil.rmtree(DATA_DIR, ignore_errors=True)
+        shutil.rmtree(CONTEST_FIXTURE, ignore_errors=True)
 
     print(f"\n{'=' * 60}\npassed {len(PASSED)}, failed {len(FAILED)}")
     if FAILED:

@@ -21,7 +21,14 @@ from server.repository import (
 )
 
 from .. import config
-from ..changes import SLUG, ApplyConflictError, apply_approved, build_apply_plan, resolve_conflict
+from ..changes import (
+    SLUG,
+    ApplyConflictError,
+    apply_approved,
+    build_apply_plan,
+    resolve_conflict,
+    scan_conflicts,
+)
 from ..schemas import ApplyRequest, ConflictResolveRequest
 from .deps import Store
 
@@ -73,6 +80,20 @@ def _build_apply_preview(repo: Repository, store) -> dict:
     }
 
 
+@router.post("/conflicts/scan")
+def scan(repo: Repo, store: Store, admin: AdminUser) -> dict:
+    """把「已通过但已经不能直接下发」的提交单挂成冲突（不写数据文件）。
+
+    审核台每次刷新都调它：这样「两个人改了同一个字段」在过审那一刻就会分出胜负
+    （最早过审的留在待下发，其余进冲突待裁定），不用等到点一键下发才发现。
+    反复调用幂等。
+    """
+    try:
+        return scan_conflicts(repo, store)
+    except (StoreError, ValidationError) as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
+
+
 @router.get("/conflicts")
 def list_conflicts(
     repo: Repo,
@@ -101,7 +122,7 @@ def resolve(
     store: Store,
     admin: AdminUser,
 ) -> dict:
-    """裁定冲突：keep_new=true 保留提交新值并立即写入，false 丢弃提交。"""
+    """裁定冲突：keep_new=true 保留提交新值（排回待下发），false 丢弃提交。"""
     try:
         result = resolve_conflict(
             repo, store, submission_id, keep_new=payload.keep_new, reviewer_id=admin.id
@@ -119,13 +140,17 @@ def resolve(
             detail="写盘失败（权限或磁盘问题），请查看服务端日志",
         ) from None
 
+    superseded = "、".join(f"#{item['submission_id']}" for item in result["superseded"])
     repo.add_log(
         actor_id=admin.id,
         username=admin.username,
         action="resolve_conflict",
         detail=(
             f"冲突裁定 #{submission_id}："
-            + ("保留提交新值并已写入" if payload.keep_new else "丢弃提交，保留磁盘现值")
+            + (
+                f"保留提交新值并排回待下发（取代 {superseded}）" if payload.keep_new
+                else "丢弃提交，保留磁盘现值"
+            )
         ),
         is_admin=True,
     )

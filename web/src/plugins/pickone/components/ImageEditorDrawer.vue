@@ -242,7 +242,7 @@ async function submit() {
   try {
     for (const field of reverted) {
       const item = myPending(field)
-      if (item) await api.withdraw(item.submission_id)
+      if (item) await api.pickone.withdraw(item.submission_id)
     }
 
     if (changes.value.length) {
