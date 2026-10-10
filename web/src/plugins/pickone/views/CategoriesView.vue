@@ -227,10 +227,10 @@ onMounted(load)
       </button>
     </div>
 
-    <el-dialog
+    <el-drawer
       v-model="createOpen"
       :title="session.isAdmin.value ? '新增类别' : '申请新增类别'"
-      width="480px"
+      size="min(480px, 92vw)"
     >
       <el-form label-width="88px">
         <el-form-item label="类别标识">
@@ -256,7 +256,7 @@ onMounted(load)
         <el-button @click="createOpen = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="submitCreate">提交</el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
   </div>
 </template>
 

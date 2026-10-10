@@ -19,6 +19,7 @@ from ..repository import (
     STATUS_CONFLICT,
     STATUS_PENDING,
     ConflictError,
+    Repository,
 )
 from ..schemas import (
     ReviewBatchRequest,
@@ -26,7 +27,7 @@ from ..schemas import (
     UserCreateRequest,
     UserUpdateRequest,
 )
-from .deps import AdminUser, Repo
+from .deps import AdminUser, Registry, Repo
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -308,18 +309,33 @@ def delete_user(user_id: int, repo: Repo, admin: AdminUser) -> dict:
 
 
 @router.get("/overview")
-def overview(repo: Repo, admin: AdminUser) -> dict:
+def overview(repo: Repo, registry: Registry, admin: AdminUser) -> dict:
     """管理台首页需要的全部计数（与具体工具无关）。
 
     插件自己的「数据目录在不在」由 `GET /api/plugins` 的 health 字段给。
     """
     _, pending_total = repo.list_submissions(status=STATUS_PENDING, limit=1)
     _, approved_total = repo.list_submissions(status=STATUS_APPROVED, limit=1)
+    counts = repo.count_by_status()
     return {
-        "submission_counts": repo.count_by_status(),
+        "submission_counts": counts,
         "pending_total": pending_total,
         "approved_total": approved_total,
-        "conflict_total": repo.count_by_status()[STATUS_CONFLICT],
+        "conflict_total": counts[STATUS_CONFLICT],
+        # 分工具的待办数。导航角标的含义是「**这个工具**的审核台还有几件事」，
+        # 拿上面那份全站数贴上去会让每个工具显示同一个数字（也就等于没意义）。
+        "plugin_counts": {
+            plugin.slug: _plugin_waiting(repo, plugin.slug) for plugin in registry
+        },
         "user_total": repo.count_users(),
         "admin_total": repo.count_admins(),
+    }
+
+
+def _plugin_waiting(repo: Repository, slug: str) -> dict[str, int]:
+    """某个工具自己的待办：待审核 + 冲突待裁定（与全站那份同一个口径）。"""
+    counts = repo.count_by_status(slug)
+    return {
+        "pending": counts[STATUS_PENDING],
+        "conflict": counts[STATUS_CONFLICT],
     }

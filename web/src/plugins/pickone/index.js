@@ -34,4 +34,15 @@ export default {
         : `${prefix} · 描述已补全`
     return { ok: true, label }
   },
+
+  /**
+   * 导航角标里本工具要额外记上的待办数。
+   *
+   * 上游待审图片不经过提交单（框架只数得到提交单），所以由插件自己报。
+   * **只报这一部分**：提交单那部分框架已经数过了，再报一遍角标就翻倍。
+   */
+  async navBadge() {
+    const overview = await api.overview()
+    return overview.audit_total ?? 0
+  },
 }

@@ -572,11 +572,10 @@ onMounted(reload)
     </div>
 
     <!-- 审核确认 -->
-    <el-dialog
+    <el-drawer
       v-model="reviewDialog.open"
       :title="reviewDialogTitle"
-      width="620px"
-      align-center
+      size="min(620px, 92vw)"
     >
       <template v-if="reviewDialog.row">
         <el-descriptions :column="2" size="small" border class="ep-mb">
@@ -682,10 +681,10 @@ onMounted(reload)
           {{ reviewDialog.approve ? '确认通过' : '确认驳回' }}
         </el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
 
     <!-- 下发预览（只读 dry-run） -->
-    <el-drawer v-model="previewOpen" size="620px" title="应用预览">
+    <el-drawer v-model="previewOpen" size="min(620px, 92vw)" title="应用预览">
       <template v-if="preview">
         <el-alert
           v-if="previewConflicts.length"
@@ -782,7 +781,7 @@ onMounted(reload)
     </el-drawer>
 
     <!-- 冲突裁定：三方对比 -->
-    <el-dialog v-model="conflictOpen" title="冲突处理" width="760px" align-center>
+    <el-drawer v-model="conflictOpen" title="冲突处理" size="min(720px, 92vw)">
       <template v-if="conflictRow">
         <el-alert
           type="error"
@@ -878,7 +877,7 @@ onMounted(reload)
       <template #footer>
         <el-button @click="conflictOpen = false">稍后处理</el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
   </div>
 </template>
 
@@ -917,7 +916,6 @@ onMounted(reload)
  */
 .preview-stats {
   flex-wrap: nowrap;
-  margin-top: 24px;
   margin-bottom: 24px;
 }
 

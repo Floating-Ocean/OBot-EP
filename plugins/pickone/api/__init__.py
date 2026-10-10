@@ -6,10 +6,10 @@
 
 from fastapi import APIRouter
 
-from . import admin, categories, images, submissions
+from . import admin, audit, categories, images, submissions
 
 # 顺序无实际影响，但保持「用户侧 → 管理侧」的阅读顺序。
-MODULES = (categories, images, submissions, admin)
+MODULES = (categories, images, submissions, admin, audit)
 
 
 def build_router() -> APIRouter:

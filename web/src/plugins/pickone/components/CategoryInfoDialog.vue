@@ -253,11 +253,10 @@ async function submit() {
 </script>
 
 <template>
-  <el-dialog
+  <el-drawer
     v-model="visible"
     :title="isNew ? '编辑待创建类别' : `修改「${category?.id ?? ''}」`"
-    width="520px"
-    align-center
+    size="min(520px, 92vw)"
   >
     <div v-if="pendingRows.length" class="pending-box">
       <div class="pending-title ep-small">审核中的改动（{{ allPending.length }} 条）</div>
@@ -338,7 +337,7 @@ async function submit() {
         {{ myPendingItem ? '更新我的提交' : '提交审核' }}
       </el-button>
     </template>
-  </el-dialog>
+  </el-drawer>
 </template>
 
 <style scoped>

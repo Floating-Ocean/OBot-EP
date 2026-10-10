@@ -4,6 +4,7 @@ import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import { fieldLabel, fromNow, renderLikeDelta, renderValue, statusMeta, truncate } from '@/utils/format'
+import ImageLightbox from './ImageLightbox.vue'
 
 /**
  * 一张表情包的编辑表单。
@@ -23,6 +24,12 @@ const visible = computed({
   get: () => props.modelValue,
   set: (value) => emit('update:modelValue', value),
 })
+
+/** 原图地址：抽屉里显示的那张，和点开放大的是同一张 */
+const rawUrl = computed(() => (props.image ? api.rawUrl(props.imgKey, props.image.name) : ''))
+
+/** 放大查看开着没 */
+const lightboxOpen = ref(false)
 
 const form = reactive({
   ocr_text: '',
@@ -288,10 +295,13 @@ async function copyText(value) {
 </script>
 
 <template>
-  <el-drawer v-model="visible" size="600px" :title="image ? image.hash_id : '编辑'" destroy-on-close>
+  <el-drawer v-model="visible" size="min(600px, 92vw)" :title="image ? image.hash_id : '编辑'" destroy-on-close>
     <template v-if="image">
       <div class="editor-top">
-        <img :src="api.rawUrl(imgKey, image.name)" :alt="image.name" class="editor-media" />
+        <!-- 点图放大：抽屉里这张只有 200px 宽，要看细节不必另开标签页 -->
+        <button type="button" class="editor-media" @click="lightboxOpen = true">
+          <img :src="rawUrl" :alt="image.name" />
+        </button>
         <div class="editor-facts">
           <div class="fact">
             <span class="ep-faint ep-small">展示 ID</span>
@@ -437,6 +447,8 @@ async function copyText(value) {
       </div>
     </template>
   </el-drawer>
+
+  <ImageLightbox :open="lightboxOpen" :list="rawUrl ? [rawUrl] : []" @close="lightboxOpen = false" />
 </template>
 
 <style scoped>
@@ -448,18 +460,19 @@ async function copyText(value) {
   display: grid;
   grid-template-columns: 200px 1fr;
   gap: 22px;
-  margin-top: 28px;
   margin-bottom: 28px;
   align-items: stretch;
 }
 
+/* 棋盘格边框留在 el-image 的根元素上，图片本身由内层 img 撑满 */
 .editor-media {
   display: block;
   width: 100%;
   height: 100%;
   min-height: 196px;
   max-height: 236px;
-  object-fit: contain;
+  overflow: hidden;
+  cursor: zoom-in;
   border-radius: var(--ep-radius);
   border: 1px solid var(--ep-border);
   background-color: var(--ep-surface-sunken);
@@ -470,6 +483,12 @@ async function copyText(value) {
     linear-gradient(-45deg, transparent 75%, rgba(20, 22, 31, 0.035) 75%);
   background-size: 18px 18px;
   background-position: 0 0, 0 9px, 9px -9px, -9px 0;
+}
+
+.editor-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .editor-facts {

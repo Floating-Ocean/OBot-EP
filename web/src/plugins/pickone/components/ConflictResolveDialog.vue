@@ -117,7 +117,7 @@ function resolveMessage(result, keepNew) {
 </script>
 
 <template>
-  <el-dialog v-model="visible" title="冲突处理" width="720px" align-center>
+  <el-drawer v-model="visible" title="冲突处理" size="min(720px, 92vw)">
     <template v-if="openConflict">
       <el-alert type="error" :closable="false" show-icon class="mb-14" :title="reason">
       </el-alert>
@@ -225,7 +225,7 @@ function resolveMessage(result, keepNew) {
     <template #footer>
       <el-button @click="visible = false">稍后处理</el-button>
     </template>
-  </el-dialog>
+  </el-drawer>
 </template>
 
 <style scoped>

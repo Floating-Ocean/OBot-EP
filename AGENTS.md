@@ -84,15 +84,12 @@ uv run ruff check .                                      # 只跑 Python lint
 
 **改完任何东西都跑 `.\check.ps1`。** 前端改完必须重新构建 —— 后端直接托管 `web/dist`。
 
-改 `.ps1` 时可以只跑 PowerShell 那一步：
+改 `.ps1` 时跑 `.\check.ps1 -Fast` 即可：它只跳前端构建，PowerShell lint 照跑。
 
-```powershell
-Import-Module PSScriptAnalyzer
-Invoke-ScriptAnalyzer -Path . -Recurse -Settings .\PSScriptAnalyzerSettings.psd1
-```
-
-`PSScriptAnalyzerSettings.psd1` 里排除的规则都写明了原因（都是对交互式启动脚本不适用的）；
-加新排除项请照样写清楚，别把整个规则集关掉。
+PSScriptAnalyzer 的排除清单内联在 `check.ps1` 顶部的 `$analyzerSettings` 哈希表里
+（`-Settings` 既收 .psd1 路径也收哈希表），不再单独维护一个 settings 文件。
+排除的规则都写明了原因（都是对交互式启动脚本不适用的）；加新排除项请照样写清楚，
+别把整个规则集关掉。
 
 ## 5. 接口门面（只记这一条，细节在 plugins/AGENTS.md）
 

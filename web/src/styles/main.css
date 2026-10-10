@@ -158,8 +158,13 @@ h3 {
 .ep-page {
   max-width: var(--ep-max-width);
   margin: 0 auto;
-  /* 上边距刻意留够：顶栏是 sticky 的，太贴会显得内容顶在栏下面 */
-  padding: 64px 52px 104px;
+  /*
+   * 上边距刻意留够：顶栏是 sticky 的，太贴会显得内容顶在栏下面。
+   * 左右必须和 .shell-inner 用同一条 clamp —— 两边 padding 不一样时，
+   * 导航行里的文字与页面内容的左边线会差几个像素（1360px 屏宽下差 8px 上下），
+   * 而这条边线正是整页最容易看出「没对齐」的地方。
+   */
+  padding: 64px clamp(18px, 3.2vw, 52px) 104px;
 }
 
 .ep-page-head {
@@ -754,7 +759,13 @@ h3 {
   padding: 4px 42px 4px 15px;
 }
 
-/* 弹窗：圆角保留，头部/底部留白拉开，底部按钮不再贴着边 */
+/*
+ * 弹窗：圆角保留，头部/底部留白拉开，底部按钮不再贴着边。
+ *
+ * 现在站内所有可交互弹窗都改成了右侧抽屉（见下面 .el-drawer 那组），
+ * 这组规则暂时没有使用者 —— 留着是为了以后真加弹窗时观感与抽屉一致，
+ * 而不是退回 Element 的默认样式。
+ */
 .el-dialog {
   border-radius: var(--ep-radius);
   padding: 0;
@@ -793,8 +804,15 @@ h3 {
   border-radius: var(--ep-radius) 0 0 var(--ep-radius);
 }
 
+/*
+ * 抽屉内容区。
+ *
+ * 顶部这 24px 是「标题栏与第一块内容」之间的留白：原先只给 4px，每个抽屉都得自己
+ * 加一句 margin-top（18 / 24 / 28px）才不贴着标题栏，迟早有人忘。补在默认值上之后，
+ * 抽屉里的第一块内容不需要再自己留上边距（那几处重复的 margin-top 已经去掉）。
+ */
 .el-drawer__body {
-  padding: 4px 32px 24px;
+  padding: 24px 32px;
 }
 
 /* 抽屉底部操作栏：与弹窗 footer 一致的观感 */

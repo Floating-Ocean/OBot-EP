@@ -31,7 +31,7 @@ plugins/<slug>/                       后端
   api/admin.py       管理侧：apply / apply-preview / overview
 
 web/src/plugins/<slug>/               前端
-  index.js           ★ 默认导出 { manifest, routes, api, stat? }
+  index.js           ★ 默认导出 { manifest, routes, api, stat?, navBadge? }
   manifest.js        名称、图标、配色、导航项
   routes.js          路由（每条 path 以 manifest.home 开头）
   api.js             接口方法表
@@ -156,13 +156,23 @@ export default {
   routes,     // 必填：路由数组
   api,        // 可选：接口方法表
   async stat() { return { ok: true, label: '3 个条目' } },   // 可选：首页卡片
+  async navBadge() { return 12 },                            // 可选：导航角标
 }
 ```
 
 - **`stat()`** 框架只认三个字段，文案由插件自己拼（框架不认识「张图」这种属于具体工具的词汇）：
   `ok: false` 时卡片显示成告警、正文用 `hint`；否则显示 `label`。抛错/返回 null → 卡片退化成「进入工具」。
+- **`navBadge()`** 是导航角标里本工具要额外记上的待办数，给「不走提交单的待办」用
+  （例如 PickOne 的上游待审图片）。角标是**分工具**的：含义是「这个工具的审核台还有几件事」，
+  框架那份由 `GET /api/admin/overview` 的 `plugin_counts` 按 slug 给（待审核 + 冲突），
+  所以这里**只报框架数不到的那部分** —— 把提交单再报一遍，本工具的角标就翻倍。
+  抛错或返回 0 只少掉自己这一份，不影响别的工具。
 - **`routes`** 每条 `path` 都要以 `manifest.home` 开头 —— 导航栏靠这个前缀判断「当前在哪个工具里」。
 - **`manifest.nav` / `adminNav`** 是导航项；`adminNav` 只对管理员显示。
+  一个导航项可以带 `children: [{ path, label }]`：它会在第一级导航下面铺成**第二级页签**
+  （「审核台」下面的「提交审核 / 待审图片」就是这样）。同一个区块有几个工作面时用这个，
+  顶级入口仍然只有一个，也不做「只有两个按钮的落地页」——点一下就到工作面。
+  父项的 `badge: true` 仍然显示角标总数。
 - **不要 import `@/api`**（循环依赖，见 [`../AGENTS.md`](../AGENTS.md) 铁律 6），用 `./api`。
   视图里用 `@/api` 没问题。
 
@@ -206,6 +216,12 @@ export default {
 `ep-stat-label` / `ep-stat-value` / `ep-section` / `ep-card` / `ep-chip(--ok|--warn|--danger)` /
 `ep-muted` / `ep-faint` / `ep-mb` / `ep-mono`。Element Plus 图标在 `main.js` 全局注册，
 模板里直接写 `<Grid />`，不要 import。
+
+**可交互的弹层统一用右侧 `el-drawer`**：`size="min(520px, 92vw)"` 这种写法在窄屏下不会溢出，
+标题与底部按钮走 `title` 与 `#footer`（`.el-drawer__header` / `__footer` 已经统一调好）。
+内容区顶部那 24px 留白由 `.el-drawer__body` 统一给，**第一块内容不要再自己加 `margin-top`**，
+加了就是双份。只有 `ElMessageBox` 的确认 / 输入提示才用居中弹窗 —— 那类「提示」保持轻量，
+不要做成抽屉。
 
 ## 6. 验证
 

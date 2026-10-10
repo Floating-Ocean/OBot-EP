@@ -369,8 +369,8 @@ onMounted(loadAll)
   <div class="ep-page">
     <div class="ep-page-head">
       <div>
-        <h1 class="ep-title">审核台</h1>
-        <p class="ep-subtitle">审核通过后可一键下发以应用更改</p>
+        <h1 class="ep-title">提交审核</h1>
+        <p class="ep-subtitle">用户提交的改动；审核通过后需一键下发才会生效</p>
       </div>
       <div class="ep-actions">
         <el-button :loading="loading" @click="loadAll" :icon="Refresh" size="large">
@@ -434,7 +434,7 @@ onMounted(loadAll)
             size="large"
             placeholder="按类别标识过滤"
             clearable
-            style="width: 200px"
+            style="width: 220px"
             @keyup.enter="((query.page = 1), load())"
             @clear="((query.page = 1), load())"
           >
@@ -479,10 +479,10 @@ onMounted(loadAll)
     </div>
 
     <!-- 审核确认 -->
-    <el-dialog
+    <el-drawer
       v-model="reviewDialog.open"
       :title="reviewDialog.approve ? '通过提交' : '驳回提交'"
-      width="480px"
+      size="min(480px, 92vw)"
     >
       <template v-if="reviewDialog.row">
         <el-descriptions :column="1" size="small" border class="ep-mb">
@@ -540,10 +540,10 @@ onMounted(loadAll)
           {{ reviewDialog.approve ? '确认通过' : '确认驳回' }}
         </el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
 
     <!-- 应用预览（只读 dry-run） -->
-    <el-drawer v-model="previewOpen" size="760px" title="应用预览">
+    <el-drawer v-model="previewOpen" size="min(760px, 92vw)" title="应用预览">
       <template v-if="preview">
         <el-alert
           v-if="previewConflicts.length"
@@ -637,12 +637,22 @@ onMounted(loadAll)
 </template>
 
 <style scoped>
+/*
+ * 这张卡片是 .ep-card--flush（自身无内边距），里面几块各有各的边距。
+ * 统一成 32px —— 与 .ep-card 的内边距、以及上方统计条里数字的位置对齐：
+ * 页签文字原本在 42px（20 容器 + 22 页签内边距），工具条在 20px，三条边线全不齐。
+ * 页签首项去掉那段内边距，下划线也就跟着落在文字下面了。
+ */
 .queue-tabs {
-  padding: 6px 20px 0;
+  padding: 6px 32px 0;
+}
+
+.queue-tabs :deep(.el-tabs__item:first-child) {
+  padding-left: 0;
 }
 
 .queue-body {
-  padding: 4px 20px 18px;
+  padding: 4px 32px 18px;
 }
 
 .toolbar {
@@ -667,7 +677,6 @@ onMounted(loadAll)
 }
 
 .ep-mb-drawer {
-  margin-top: 24px;
   margin-bottom: 24px;
 }
 

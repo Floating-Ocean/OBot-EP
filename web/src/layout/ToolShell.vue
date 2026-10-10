@@ -9,8 +9,11 @@ import { currentPlugin, pluginBySlug } from '@/plugins/registry'
 import OBotLogo from '@/components/OBotLogo.vue'
 
 const props = defineProps({
-  /** 审核台待处理数量，用于导航角标 */
-  pendingCount: { type: Number, default: 0 },
+  /**
+   * 每个工具的导航角标数（slug → 件数），由 `App.vue` 汇总：
+   * 框架数得到的提交单 + 插件自报的待办。**必须是分工具的**，见那里的注释。
+   */
+  badges: { type: Object, default: () => ({}) },
 })
 
 const route = useRoute()
@@ -133,6 +136,12 @@ const toolNavItems = computed(() => {
 })
 
 /**
+ * 导航项上的角标数：只认**当前这个工具**的数。
+ * 这一行本来就只显示一个工具的页面，所以整行共用一个 key（工具 slug）。
+ */
+const badgeCount = computed(() => props.badges[contextPlugin.value?.manifest.slug ?? ''] ?? 0)
+
+/**
  * 账号菜单的条目。账号管理 / 操作日志是**框架**的全局页面，不属于任何工具，
  * 所以不进工具导航行 —— 整行只有一种含义：「当前工具里的页面」。
  * 全局动作收在右上角账号菜单里，那里本来就是「跟当前工具无关」的地方。
@@ -167,6 +176,47 @@ const activePath = computed(() => {
     .filter((item) => route.path === item.path || route.path.startsWith(`${item.path}/`))
     .sort((a, b) => b.path.length - a.path.length)
   return matches[0]?.path ?? route.path
+})
+
+/* ---- 第二级导航 ---- */
+
+/**
+ * 导航项可以带 `children`：同一个区块里的几个工作面（「审核台」下面的
+ * 「提交审核 / 待审图片」就是）。`children` 由插件在 manifest 里声明。
+ *
+ * 这样顶级导航仍然只有一个入口，但每个工作面各占一格、点一下就到 ——
+ * 不需要先进一个落地页再点第二次，也不会出现两个并列的「xx审核」被读成
+ * 同一个控件的两个标签页。
+ */
+function isPathActive(path) {
+  return route.path === path || route.path.startsWith(`${path}/`)
+}
+
+/**
+ * 当前所在的区块：命中的顶级项，或命中了某个子项的那个顶级项。
+ *
+ * 必须取**匹配最深**的那一项：`/pickone`（所有表情）是所有子路径的前缀，
+ * 先命中的话任何页面都会被判成「在 所有表情 区块里」，二级导航永远不出现。
+ * 第一级的选中态（activePath）用的是同一套最长匹配。
+ */
+const activeSection = computed(() => {
+  const matched = toolNavItems.value
+    .filter(
+      (item) =>
+        isPathActive(item.path) || (item.children ?? []).some((child) => isPathActive(child.path)),
+    )
+    .sort((a, b) => b.path.length - a.path.length)
+  return matched[0] ?? null
+})
+
+const subNavItems = computed(() => activeSection.value?.children ?? [])
+
+/** 子页签的选中态同样取最长前缀，避免 /review 把 /review/images 也点亮 */
+const activeSubPath = computed(() => {
+  const matched = subNavItems.value
+    .filter((child) => isPathActive(child.path))
+    .sort((a, b) => b.path.length - a.path.length)
+  return matched[0]?.path ?? ''
 })
 
 /* ---- 账号菜单 ---- */
@@ -302,7 +352,7 @@ async function submitPassword() {
           >
             <el-icon><component :is="item.icon" /></el-icon>
             <span class="nav-label">{{ item.label }}</span>
-            <em v-if="item.badge && pendingCount" class="nav-badge">{{ pendingCount }}</em>
+            <em v-if="item.badge && badgeCount" class="nav-badge">{{ badgeCount }}</em>
           </router-link>
 
           <div class="nav-right">
@@ -336,6 +386,24 @@ async function submitPassword() {
           </div>
         </div>
       </nav>
+
+      <!--
+        第二级导航：当前区块的几个工作面。刻意做得比第一级轻（文字 + 下划线），
+        否则两排一模一样的药丸会像两排并列的主导航，又把「一层入口」讲回成两个工具。
+      -->
+      <nav v-if="subNavItems.length" class="shell-subnav">
+        <div class="shell-inner subnav-row">
+          <router-link
+            v-for="child in subNavItems"
+            :key="child.path"
+            :to="child.path"
+            class="subnav-link"
+            :class="{ 'is-active': child.path === activeSubPath }"
+          >
+            {{ child.label }}
+          </router-link>
+        </div>
+      </nav>
     </header>
 
     <main class="shell-main">
@@ -344,7 +412,7 @@ async function submitPassword() {
       </router-view>
     </main>
 
-    <el-dialog v-model="themeOpen" title="颜色模式" width="440px">
+    <el-drawer v-model="themeOpen" title="颜色模式" size="min(440px, 92vw)">
       <div class="theme-row">
         <div>
           <p class="theme-row-title">跟随系统</p>
@@ -368,9 +436,9 @@ async function submitPassword() {
       <template #footer>
         <el-button type="primary" @click="themeOpen = false">完成</el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
 
-    <el-dialog v-model="passwordOpen" title="修改密码" width="440px">
+    <el-drawer v-model="passwordOpen" title="修改密码" size="min(440px, 92vw)">
       <el-form label-position="top">
         <el-form-item label="原密码">
           <el-input v-model="passwordForm.old_password" type="password" show-password
@@ -396,7 +464,7 @@ async function submitPassword() {
           保存
         </el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
   </div>
 </template>
 
@@ -405,6 +473,16 @@ async function submitPassword() {
   min-height: 100%;
   display: flex;
   flex-direction: column;
+  /*
+   * 进入动效（页面内容上浮 / 二级导航行下滑）共用的曲线。
+   *
+   * 不用 ease-out：它是「起步中等、尾巴很长」——0.4s 里前 0.16s 只走完 ~78%，
+   * 剩下 0.24s 都在挪最后那两像素，看着就是拖拉。
+   * 这条（easeOutQuint）前 0.12s 走完 ~83%、约 0.18s 就基本到位，
+   * 于是 0.4s 只剩一点点收尾，不再拖；位移本身也没被砍掉。
+   * 想更利落可以换 cubic-bezier(0.16, 1, 0.3, 1)（近似 easeOutExpo，更极端）。
+   */
+  --ep-enter-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .shell-bar {
@@ -574,6 +652,109 @@ html.dark .shell-nav {
   background: rgba(20, 25, 33, 0.5);
 }
 
+/* 第二级导航：比第一级矮、比第一级淡，靠下划线而不是药丸表示选中 */
+.shell-subnav {
+  border-top: 1px solid var(--ep-border);
+  background: rgba(255, 255, 255, 0.3);
+  /* 进这个区块时整行淡入下滑一点，别硬生生「跳」出来 */
+  animation: ep-subnav-in 0.4s var(--ep-enter-ease);
+}
+
+html.dark .shell-subnav {
+  background: rgba(20, 25, 33, 0.34);
+}
+
+@keyframes ep-subnav-in {
+  from {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+}
+
+.shell-inner.subnav-row {
+  height: clamp(44px, 4vw, 52px);
+  gap: clamp(16px, 1.8vw, 30px);
+  /*
+   * 和第一级药丸里的文字左对齐：药丸自己有一圈内边距，纯文字的页签得补上同样的量，
+   * 否则两行的第一个字会错开一格，看着就是没对齐。
+   */
+  padding-left: calc(clamp(18px, 3.2vw, 52px) + clamp(12px, 1.4vw, 18px));
+}
+
+.subnav-link {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ep-ink-muted);
+  white-space: nowrap;
+  transition: color 0.4s ease;
+}
+
+.subnav-link:hover {
+  color: var(--ep-ink);
+}
+
+.subnav-link.is-active {
+  color: var(--ep-brand-b);
+}
+
+/*
+ * 下划线压在行的下边框上，读起来像「页签」而不是「按钮」。
+ * 用 scaleX 从左侧长出来，切换时是「划过去」而不是硬切。
+ * 颜色用 --ep-brand-b 而不是那条深色渐变：深色模式下渐变不换色，
+ * 2px 的深青压在深底上根本看不见。
+ */
+.subnav-link::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--ep-brand-b);
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform 0.4s ease;
+}
+
+.subnav-link.is-active::after {
+  transform: scaleX(1);
+}
+
+/*
+ * 路由切换：新页面淡入并轻微上浮。
+ *
+ * 只做「进」不做「出」：旧元素直接移除，既不会出现两页同时在位、
+ * 把容器高度顶跳一下，也不要求每个页面组件都是单根元素（过渡要求单根）。
+ */
+.shell-main > :deep(*) {
+  animation: ep-page-in 0.5s var(--ep-enter-ease);
+}
+
+@keyframes ep-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(13px);
+  }
+}
+
+/* 上面这几处动效对「减少动态效果」的用户一律关掉 */
+@media (prefers-reduced-motion: reduce) {
+  .shell-subnav,
+  .shell-main > :deep(*) {
+    animation: none;
+  }
+
+  .subnav-link,
+  .subnav-link::after {
+    transition: none;
+  }
+}
+
 .nav-row {
   height: clamp(56px, 5vw, 68px);
   gap: 6px;
@@ -590,7 +771,12 @@ html.dark .shell-nav {
   font-weight: 600;
   color: var(--ep-ink-muted);
   white-space: nowrap;
-  transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+  /*
+   * 只过渡能过渡的属性。选中态那层底是渐变（background-image），它本来就动画不了，
+   * 所以文字颜色不能再单独淡入 —— 否则背景「啪」地换掉、字却慢慢变色，很怪。
+   * 悬停底色是 background-color，能过渡，保留。
+   */
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .nav-link:hover {

@@ -251,7 +251,7 @@ onMounted(load)
       </el-table>
     </div>
 
-    <el-dialog v-model="createOpen" title="新建账号" width="440px">
+    <el-drawer v-model="createOpen" title="新建账号" size="min(440px, 92vw)">
       <el-form label-position="top">
         <el-form-item label="用户名">
           <el-input v-model="createForm.username" placeholder="字母、数字、下划线、短横线、点"
@@ -277,12 +277,12 @@ onMounted(load)
         <el-button @click="createOpen = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="submitCreate">创建</el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
 
-    <el-dialog
+    <el-drawer
       :model-value="Boolean(resetTarget)"
       title="重置密码"
-      width="400px"
+      size="min(400px, 92vw)"
       @update:model-value="(value) => !value && (resetTarget = null)"
     >
       <p class="ep-small ep-muted">
@@ -294,7 +294,7 @@ onMounted(load)
         <el-button @click="resetTarget = null">取消</el-button>
         <el-button type="primary" :loading="resetting" @click="confirmReset">确认重置</el-button>
       </template>
-    </el-dialog>
+    </el-drawer>
   </div>
 </template>
 

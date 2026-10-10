@@ -8,6 +8,10 @@ export const thumbUrl = (imgKey, name) =>
   `/api${BASE}/images/${encodeURIComponent(imgKey)}/thumb/${encodeURIComponent(name)}`
 export const rawUrl = (imgKey, name) =>
   `/api${BASE}/images/${encodeURIComponent(imgKey)}/raw/${encodeURIComponent(name)}`
+export const auditThumbUrl = (imgKey, name) =>
+  `/api${BASE}/admin/audit/${encodeURIComponent(imgKey)}/thumb/${encodeURIComponent(name)}`
+export const auditRawUrl = (imgKey, name) =>
+  `/api${BASE}/admin/audit/${encodeURIComponent(imgKey)}/raw/${encodeURIComponent(name)}`
 
 /**
  * PickOne 插件自己的接口。
@@ -31,6 +35,8 @@ const pickoneApi = {
     http.get(`${BASE}/images/${encodeURIComponent(imgKey)}/hash-id/${encodeURIComponent(hashId)}`),
   thumbUrl,
   rawUrl,
+  auditThumbUrl,
+  auditRawUrl,
 
   // ---- 提交 ----
   submissions: (params) => http.get(`${BASE}/submissions`, { params }),
@@ -70,6 +76,13 @@ const pickoneApi = {
   integrity: () => http.get(`${BASE}/admin/integrity`),
   /** 审核台首页：本插件的计数 + 数据目录是否可用 */
   overview: () => http.get(`${BASE}/admin/overview`),
+
+  // ---- OBot-ACM 原生 __AUDIT__ 队列（与提交单审核完全分开） ----
+  auditQueue: (params) => http.get(`${BASE}/admin/audit`, { params }),
+  approveAudit: (imgKey, name) =>
+    http.post(`${BASE}/admin/audit/${encodeURIComponent(imgKey)}/${encodeURIComponent(name)}/approve`),
+  rejectAudit: (imgKey, name) =>
+    http.post(`${BASE}/admin/audit/${encodeURIComponent(imgKey)}/${encodeURIComponent(name)}/reject`),
 }
 
 export default pickoneApi

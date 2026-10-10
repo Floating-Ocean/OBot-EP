@@ -60,6 +60,7 @@ MD5S = [
     "6f708192a3b4c5d6e7f8091a2b3c4d5e",
     "708192a3b4c5d6e7f8091a2b3c4d5e6f",
 ]
+AUDIT_MD5 = "abcdef0123456789abcdef0123456789"
 
 
 def check(label: str, condition: bool, extra: str = "") -> None:
@@ -110,12 +111,45 @@ def build_fixture() -> None:
         json.dumps(lzh_parser, ensure_ascii=False, indent=4), encoding="utf-8"
     )
 
+    # __AUDIT__ mirrors OBot-ACM's native queue for ordinary-user uploads.
+    (FIXTURE / "empty_cat").mkdir()
+    (FIXTURE / "empty_cat" / f"{MD5S[0]}.gif").write_bytes(make_gif((40, 220, 120)))
+    (FIXTURE / "empty_cat" / "parser.json").write_text(
+        json.dumps(
+            {
+                f"{MD5S[0]}.gif": {
+                    "ocr_text": "已有图片",
+                    "add_time": 1700000100.0,
+                    "likes": 0,
+                    "comments": [],
+                    "pickup_times": 0,
+                },
+                f"{AUDIT_MD5}.gif": {
+                    "ocr_text": "待审图片",
+                    "add_time": 1700000101.0,
+                    "likes": 0,
+                    "comments": [],
+                    "pickup_times": 0,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (FIXTURE / "__AUDIT__" / "empty_cat").mkdir()
+    (FIXTURE / "__AUDIT__" / "empty_cat" / f"{AUDIT_MD5}.gif").write_bytes(
+        make_gif((220, 40, 120))
+    )
+    (FIXTURE / "__AUDIT__" / "empty_cat" / f"{MD5S[0]}.gif").write_bytes(
+        make_gif((40, 220, 120))
+    )
+    (FIXTURE / "__AUDIT__" / "empty_cat" / f"{MD5S[1]}.gif").write_bytes(
+        make_gif((40, 120, 220))
+    )
+
     # kepy: has images but no entries in parser.json (this really happens in production)
     (FIXTURE / "kepy" / f"{MD5S[0]}.gif").write_bytes(make_gif((200, 80, 40)))
     (FIXTURE / "kepy" / "parser.json").write_text("{}", encoding="utf-8")
-
-    # Empty category (present in config, but no images in its directory)
-    (FIXTURE / "empty_cat").mkdir()
 
     config = {
         "lzh": {"id": "小廖", "key": ["小廖", "xl", "lzh"]},
@@ -230,6 +264,82 @@ def main() -> int:
             )
             r = alice.post("/api/auth/login", json={"username": "alice", "password": "wrong"})
             check("Wrong password rejected", r.status_code == 401)
+
+            print("\n== OBot-ACM native audit queue ==")
+            r = alice.get("/api/plugins/pickone/admin/audit")
+            check("Regular user cannot read native audit queue", r.status_code == 403, r.text[:200])
+            r = admin_client.get("/api/plugins/pickone/admin/audit", params={"page_size": 10})
+            audit_items = r.json()["items"]
+            check(
+                "Native audit queue is separate from submissions",
+                r.status_code == 200 and r.json()["total"] == 3 and len(audit_items) == 3,
+                r.text[:300],
+            )
+            audit_new = next(item for item in audit_items if item["md5"] == AUDIT_MD5)
+            audit_duplicate = next(item for item in audit_items if item["md5"] == MD5S[0])
+            audit_rejected = next(item for item in audit_items if item["md5"] == MD5S[1])
+            r = admin_client.get("/api/plugins/pickone/admin/overview")
+            check(
+                "Overview reports the upstream wait count for the nav badge",
+                r.status_code == 200 and r.json()["audit_total"] == 3,
+                r.text[:200],
+            )
+            # 导航角标必须分工具：框架那份由 plugin_counts 按 slug 给，
+            # 与同一个工具的审核队列计数口径一致（拿全站数贴上去就会每个工具都一样）。
+            framework = admin_client.get("/api/admin/overview").json()
+            scoped = framework.get("plugin_counts", {})
+            queue_counts = admin_client.get(
+                "/api/admin/queue", params={"plugin": "pickone", "status": "pending"}
+            ).json()["counts"]
+            check(
+                "Framework overview splits the wait count per plugin",
+                {"pickone", "contestlist"} <= set(scoped)
+                and scoped["pickone"]["pending"] == queue_counts["pending"]
+                and scoped["pickone"]["conflict"] == queue_counts["conflict"],
+                str(scoped)[:200],
+            )
+            r = admin_client.get(
+                f"/api/plugins/pickone/admin/audit/empty_cat/thumb/{audit_new['name']}"
+            )
+            check("Native audit thumbnail is admin-only and readable", r.status_code == 200, r.text[:200])
+            r = alice.get(f"/api/plugins/pickone/admin/audit/empty_cat/raw/{audit_new['name']}")
+            check("Native audit image is not public to regular users", r.status_code == 403, r.text[:200])
+
+            r = admin_client.post(
+                f"/api/plugins/pickone/admin/audit/empty_cat/{audit_new['name']}/approve"
+            )
+            check(
+                "Approving native audit image moves it into the live category",
+                r.status_code == 200
+                and r.json()["status"] == "approved"
+                and (FIXTURE / "empty_cat" / audit_new["name"]).is_file()
+                and not (FIXTURE / "__AUDIT__" / "empty_cat" / audit_new["name"]).exists(),
+                r.text[:300],
+            )
+            r = admin_client.post(
+                f"/api/plugins/pickone/admin/audit/empty_cat/{audit_duplicate['name']}/approve"
+            )
+            check(
+                "Approving an existing duplicate clears only the audit copy",
+                r.status_code == 200
+                and r.json()["status"] == "duplicate"
+                and not (FIXTURE / "__AUDIT__" / "empty_cat" / audit_duplicate["name"]).exists(),
+                r.text[:300],
+            )
+            r = admin_client.post(
+                f"/api/plugins/pickone/admin/audit/empty_cat/{audit_rejected['name']}/reject"
+            )
+            check(
+                "Rejecting native audit image deletes only the audit copy",
+                r.status_code == 200
+                and r.json()["status"] == "rejected"
+                and not (FIXTURE / "__AUDIT__" / "empty_cat" / audit_rejected["name"]).exists(),
+                r.text[:300],
+            )
+            check(
+                "Native audit queue is empty after decisions",
+                admin_client.get("/api/plugins/pickone/admin/audit").json()["total"] == 0,
+            )
 
             print("\n== Browsing ==")
             r = alice.get("/api/plugins/pickone/categories")

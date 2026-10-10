@@ -58,6 +58,34 @@ Invoke-Step 'Lint (ruff)' -ShowOutput:$Verbose {
     & uv run ruff check .
 }
 
+# ---- PSScriptAnalyzer 配置 ----
+#
+# 原先放在单独的 PSScriptAnalyzerSettings.psd1 里，但只有这个脚本用它 —— 为一个
+# 排除清单多养一个文件不划算，所以内联成哈希表（-Settings 收路径也收哈希表）。
+# 排除的规则都是「对这类脚本不适用」，不是「懒得修」——每条都写清楚为什么，
+# 这样下一个人（或 Agent）不必重新判断一遍。
+$analyzerSettings = @{
+    Severity = @('Error', 'Warning')
+
+    ExcludeRules = @(
+        # 面向人的交互式启动脚本：彩色输出、-NoNewline 进度、不被管道吞掉，
+        # 正是 Write-Host 的用途。改成 Write-Output 反而会把这些行塞进管道。
+        'PSAvoidUsingWriteHost'
+
+        # Start-Job 的脚本块用 param() + -ArgumentList 接收参数，这是官方支持的写法，
+        # 分析器只认 $using: 那一种，属于误报。
+        'PSUseUsingScopeModifierInNewRunspaces'
+
+        # Get-LanAddresses / Get-DuplicatePackageCopies 是脚本内的私有函数，不是导出的
+        # cmdlet，单复数约定在这里没有意义（改了反而更难读）。
+        'PSUseSingularNouns'
+
+        # 这些文件里的中文只出现在注释，所有输出字符串都是 ASCII 英文。
+        # PS 7 默认按 UTF-8 读取，不需要 BOM；加 BOM 反而会让 diff/grep 变脏。
+        'PSUseBOMForUnicodeEncodedFile'
+    )
+}
+
 Invoke-Step 'PowerShell lint (PSScriptAnalyzer)' -ShowOutput:$Verbose {
     if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
         # 不是每个环境都装了它，而且装它要联网。缺了就跳过，不能让整个门禁挂掉。
@@ -67,7 +95,7 @@ Invoke-Step 'PowerShell lint (PSScriptAnalyzer)' -ShowOutput:$Verbose {
     }
     Import-Module PSScriptAnalyzer
     $findings = @(
-        Invoke-ScriptAnalyzer -Path $root -Recurse -Settings (Join-Path $root 'PSScriptAnalyzerSettings.psd1')
+        Invoke-ScriptAnalyzer -Path $root -Recurse -Settings $analyzerSettings
     )
     if ($findings.Count -gt 0) {
         $findings | ForEach-Object {

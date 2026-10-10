@@ -339,8 +339,7 @@ async function submit() {
 </script>
 
 <template>
-  <el-drawer v-model="visible" size="600px" :title="title" destroy-on-close>
-    <div class="editor-top"></div>
+  <el-drawer v-model="visible" size="min(600px, 92vw)" :title="title" destroy-on-close>
     <template v-if="isUpdate">
       <!--
         审核中的改动：磁盘原值 → 每条在途改动，连作者一起列出来（可能不止一个人）。
@@ -475,10 +474,6 @@ async function submit() {
 </template>
 
 <style scoped>
-.editor-top {
-  margin-top: 18px;
-}
-
 /* 在途改动：只读信息块，跟可编辑的表单在视觉上分开 */
 .pending-box {
   border: 1px solid var(--ep-border);

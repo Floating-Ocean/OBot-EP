@@ -209,6 +209,9 @@ def overview(repo: Repo, store: Store, admin: AdminUser) -> dict:
         "pending_total": pending_total,
         "approved_total": approved_total,
         "conflict_total": counts[STATUS_CONFLICT],
+        # 上游待审图片不经过提交单表，框架的导航角标数不到它们，
+        # 所以这里一并报出去，由插件前端的 navBadge() 数进角标。
+        "audit_total": store.audit_count(),
         "lib_dir": str(store.lib_dir),
         "lib_available": config.PICK_ONE_DIR.is_dir(),
     }

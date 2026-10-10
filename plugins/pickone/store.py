@@ -92,6 +92,19 @@ class ImageStat:
         return not self.ocr_text.strip()
 
 
+@dataclass
+class AuditImage:
+    """一张来自 OBot-ACM ``__AUDIT__`` 目录的待审图片。"""
+
+    img_key: str
+    category_id: str
+    name: str
+    md5: str
+    hash_id: str
+    add_time: float
+    size: int
+
+
 def _atomic_write_json(path: Path, data: Any) -> None:
     """先写临时文件再原子替换，最后清掉临时文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -166,6 +179,7 @@ class PickOneStore:
     def __init__(self, lib_dir: Path | None = None) -> None:
         self.lib_dir = Path(lib_dir or config.PICK_ONE_DIR)
         self._cache = _FileCache()
+        self._audit_lock = threading.RLock()
 
     # ---------- 基础路径 ----------
 
@@ -193,6 +207,19 @@ class PickOneStore:
             raise ValidationError("图片路径越界")
         if not target.is_file():
             raise NotFoundError(f"图片不存在: {img_key}/{name}")
+        return target
+
+    def audit_image_path(self, img_key: str, name: str) -> Path:
+        """解析 ``__AUDIT__`` 下的图片路径，不能访问正式数据目录。"""
+        if not self.is_valid_image_name(name):
+            raise ValidationError(f"非法的图片名: {name!r}")
+
+        directory = self.category_dir(img_key, audit=True).resolve()
+        target = (directory / name).resolve()
+        if target.parent != directory:
+            raise ValidationError("图片路径越界")
+        if not target.is_file():
+            raise NotFoundError(f"待审核图片不存在: {img_key}/{name}")
         return target
 
     @staticmethod
@@ -304,6 +331,72 @@ class PickOneStore:
             return []
         names.sort()
         return names
+
+    def list_audit_images(
+        self, img_key: str | None = None, *, page: int = 1, page_size: int = 60
+    ) -> tuple[list[AuditImage], int]:
+        """列出上游 Bot 放入 ``__AUDIT__`` 的图片，不读写提交单。"""
+        categories = self.load_categories()
+        keys = [img_key] if img_key else sorted(categories)
+        items: list[AuditImage] = []
+        for key in keys:
+            category = categories.get(key)
+            if category is None:
+                if img_key:
+                    raise NotFoundError(f"类别不存在: {img_key}")
+                continue
+            try:
+                directory = self.category_dir(key, audit=True)
+                entries = list(os.scandir(directory))
+            except OSError:
+                continue
+            for entry in entries:
+                if not entry.is_file() or not entry.name.endswith(GIF_SUFFIX):
+                    continue
+                md5 = entry.name[: -len(GIF_SUFFIX)]
+                if not is_md5(md5):
+                    continue
+                try:
+                    stat = entry.stat()
+                except OSError:
+                    continue
+                items.append(
+                    AuditImage(
+                        img_key=key,
+                        category_id=category.id,
+                        name=entry.name,
+                        md5=md5,
+                        hash_id=hash_id_of(md5),
+                        add_time=stat.st_mtime,
+                        size=stat.st_size,
+                    )
+                )
+
+        items.sort(key=lambda item: (-item.add_time, item.img_key, item.name))
+        total = len(items)
+        start = (page - 1) * page_size
+        return items[start : start + page_size], total
+
+    def audit_count(self) -> int:
+        return self.list_audit_images(page=1, page_size=1_000_000)[1]
+
+    def approve_audit_image(self, img_key: str, name: str) -> str:
+        """把待审图片原子移动到正式类别，返回 ``approved`` 或 ``duplicate``。"""
+        with self._audit_lock:
+            source = self.audit_image_path(img_key, name)
+            target_dir = self.category_dir(img_key)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / name
+            if target.exists():
+                source.unlink()
+                return "duplicate"
+            os.replace(source, target)
+            return "approved"
+
+    def reject_audit_image(self, img_key: str, name: str) -> None:
+        """删除一张被管理员驳回的上游待审图片。"""
+        with self._audit_lock:
+            self.audit_image_path(img_key, name).unlink()
 
     def _merge_entry(self, name: str, raw_value: Any, directory: Path) -> ImageStat:
         """把 parser.json 里的一条记录归一化成 ImageStat。"""
